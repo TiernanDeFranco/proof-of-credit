@@ -43,10 +43,9 @@ class AccountBalance {
   }
 
   decrease(amount: number) {
-    if (this.balance < amount) {
-      throw new Error("Insufficient funds.");
+    if (this.balance > amount) {
+      this.balance -= amount;
     }
-    this.balance -= amount;
   }
 }
 
@@ -166,11 +165,15 @@ class Chain {
     const payerBalance = this.getLatestBalanceFromChain(transfer.payer);
     const payeeBalance = this.getLatestBalanceFromChain(transfer.payee);
 
+    // If the payer does not have enough balance and is not the blockchain mint, return without processing
     if (
       payerBalance < transfer.amount &&
       transfer.payer !== this.blockchainMintAddress
     ) {
-      throw new Error("Insufficient funds for this transfer.");
+      console.log(
+        `Insufficient funds: ${transfer.payer} has ${payerBalance}, tried to send ${transfer.amount}.`
+      );
+      return; // Don't process the transfer
     }
 
     // Ensure the Blockchain Mint does not accumulate a balance
@@ -274,7 +277,7 @@ class Chain {
     const minerCredit = new Credit(
       miningReward,
       minerWallet.publicKey,
-      "Mining Reward"
+      "Block Reward"
     );
     block.creditLedger.push(minerCredit);
   }
@@ -294,10 +297,10 @@ class Chain {
       } else if (!payerInLast1Block) {
         // Reward both payer and payee if they weren't in the last block
         block.creditLedger.push(
-          new Credit(10, transfer.payer, "Credit for transaction")
+          new Credit(10, transfer.payer, "Using The Network")
         );
         block.creditLedger.push(
-          new Credit(10, transfer.payee, "Credit for transaction")
+          new Credit(10, transfer.payee, "Using The Network")
         );
       } else {
         // No rewards if the payer was in the last block
@@ -329,7 +332,7 @@ class Chain {
         null,
         [], // No transfers
         [], // No account balances
-        [new Credit(500, minerWallet.publicKey, "Genesis Mining Reward")], // Initial credit ledger
+        [new Credit(500, minerWallet.publicKey, "Genesis Block Reward")], // Initial credit ledger
         [
           new CreditScore(
             minerWallet.publicKey,
@@ -400,10 +403,28 @@ class Wallet {
     this.publicKey = keyPair.publicKey;
     this.privateKey = keyPair.privateKey;
   }
-
   sendMoney(amount: number, payeePublicKey: string) {
-    const transfer = new Transfer(amount, this.publicKey, payeePublicKey);
-    Chain.instance.addTransferToPool(transfer);
+    // Get the payer's latest balance
+    const payerBalance = Chain.instance.getLatestBalanceFromChain(
+      this.publicKey
+    );
+
+    // Check if the payer has sufficient funds
+    if (payerBalance < amount) {
+      console.log(
+        `Transaction failed: Insufficient funds. ${this.publicKey} tried to send ${amount}, but only has ${payerBalance}.`
+      );
+      return; // Do not proceed with the transfer
+    }
+
+    // Create the transfer if sufficient funds exist
+    try {
+      const transfer = new Transfer(amount, this.publicKey, payeePublicKey);
+      Chain.instance.addTransferToPool(transfer);
+    } catch (e) {
+      // Log or handle any errors in the transfer creation
+      console.log(`Transaction failed: ${e}`);
+    }
   }
 }
 
@@ -457,5 +478,7 @@ function delay(ms: number) {
 
   await delay(10000);
 
-  miner.sendMoney(100, bob.publicKey);
+  miner.sendMoney(10000, bob.publicKey);
+  miner.sendMoney(100, miner.publicKey);
+  bob.sendMoney(100, miner.publicKey);
 })();

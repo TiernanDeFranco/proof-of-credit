@@ -66,10 +66,9 @@ class AccountBalance {
         this.balance += amount;
     }
     decrease(amount) {
-        if (this.balance < amount) {
-            throw new Error("Insufficient funds.");
+        if (this.balance > amount) {
+            this.balance -= amount;
         }
-        this.balance -= amount;
     }
 }
 // CreditScore class to hold credit score for each account
@@ -171,9 +170,11 @@ class Chain {
     applyTransfer(transfer, block) {
         const payerBalance = this.getLatestBalanceFromChain(transfer.payer);
         const payeeBalance = this.getLatestBalanceFromChain(transfer.payee);
+        // If the payer does not have enough balance and is not the blockchain mint, return without processing
         if (payerBalance < transfer.amount &&
             transfer.payer !== this.blockchainMintAddress) {
-            throw new Error("Insufficient funds for this transfer.");
+            console.log(`Insufficient funds: ${transfer.payer} has ${payerBalance}, tried to send ${transfer.amount}.`);
+            return; // Don't process the transfer
         }
         // Ensure the Blockchain Mint does not accumulate a balance
         if (transfer.payer !== this.blockchainMintAddress) {
@@ -250,7 +251,7 @@ class Chain {
     // Reward miner credits and add to credit ledger
     rewardMiner(minerWallet, block) {
         const miningReward = 100;
-        const minerCredit = new Credit(miningReward, minerWallet.publicKey, "Mining Reward");
+        const minerCredit = new Credit(miningReward, minerWallet.publicKey, "Block Reward");
         block.creditLedger.push(minerCredit);
     }
     // Apply credit earning rules
@@ -265,8 +266,8 @@ class Chain {
             }
             else if (!payerInLast1Block) {
                 // Reward both payer and payee if they weren't in the last block
-                block.creditLedger.push(new Credit(10, transfer.payer, "Credit for transaction"));
-                block.creditLedger.push(new Credit(10, transfer.payee, "Credit for transaction"));
+                block.creditLedger.push(new Credit(10, transfer.payer, "Using The Network"));
+                block.creditLedger.push(new Credit(10, transfer.payee, "Using The Network"));
             }
             else {
                 // No rewards if the payer was in the last block
@@ -285,7 +286,7 @@ class Chain {
             console.log("🚀 Creating the Genesis Block...");
             const genesisBlock = new Block("Genesis", null, [], // No transfers
             [], // No account balances
-            [new Credit(500, minerWallet.publicKey, "Genesis Mining Reward")], // Initial credit ledger
+            [new Credit(500, minerWallet.publicKey, "Genesis Block Reward")], // Initial credit ledger
             [
                 new CreditScore(minerWallet.publicKey, this.getLatestCreditScoreFromChain(minerWallet.publicKey) + 500),
             ] // Initial credit score
@@ -332,8 +333,22 @@ class Wallet {
         this.privateKey = keyPair.privateKey;
     }
     sendMoney(amount, payeePublicKey) {
-        const transfer = new Transfer(amount, this.publicKey, payeePublicKey);
-        Chain.instance.addTransferToPool(transfer);
+        // Get the payer's latest balance
+        const payerBalance = Chain.instance.getLatestBalanceFromChain(this.publicKey);
+        // Check if the payer has sufficient funds
+        if (payerBalance < amount) {
+            console.log(`Transaction failed: Insufficient funds. ${this.publicKey} tried to send ${amount}, but only has ${payerBalance}.`);
+            return; // Do not proceed with the transfer
+        }
+        // Create the transfer if sufficient funds exist
+        try {
+            const transfer = new Transfer(amount, this.publicKey, payeePublicKey);
+            Chain.instance.addTransferToPool(transfer);
+        }
+        catch (e) {
+            // Log or handle any errors in the transfer creation
+            console.log(`Transaction failed: ${e}`);
+        }
     }
 }
 // Node class representing a node in the network that mines blocks
@@ -371,5 +386,7 @@ function delay(ms) {
 (async () => {
     await mintAndPushBlock();
     await delay(10000);
-    miner.sendMoney(100, bob.publicKey);
+    miner.sendMoney(10000, bob.publicKey);
+    miner.sendMoney(100, miner.publicKey);
+    bob.sendMoney(100, miner.publicKey);
 })();
