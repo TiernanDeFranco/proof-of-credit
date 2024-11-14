@@ -406,9 +406,6 @@ class Chain {
   connectedNodes: Node[] = [];
   eligibleValidators: Node[] = [];
 
-  blockTime = 5000; // 5 seconds
-  voteTimeout: number = 15000; // 10 seconds to collect votes
-
   initialMintingReward = 100;
   minimumReward = 1;
 
@@ -597,15 +594,8 @@ class Chain {
     }
 
     if (previousBlock.index !== "Genesis") {
-      if (
-        newBlock.timestamp <=
-        previousBlock.timestamp + this.blockTime + this.voteTimeout
-      ) {
-        console.log(
-          `Invalid block timestamp. Blocks must have at least ${
-            this.blockTime + this.voteTimeout
-          } ms between them.`
-        );
+      if (newBlock.timestamp <= previousBlock.timestamp + this.blockTime - 10) {
+        console.log(`Invalid block timestamp. Blocks too close together`);
         return false;
       }
     }
@@ -867,7 +857,7 @@ class Chain {
       genesisBlock.toJSON()
     );
 
-    this.appendBlockToFile(genesisBlock);
+    //this.appendBlockToFile(genesisBlock);
 
     this.proposeBlock();
   }
@@ -1288,13 +1278,20 @@ class Chain {
     }
   }
 
-  public voteTimestamp: number | null = null;
+  blockTime = 20_000;
+  proposalOffset = 1_000;
+  voteOffset = 10_000;
+  evalVoteOffset = 5_000;
+
+  voteTimestamp: number | null = null;
+  evalVoteTimestamp: number | null = null;
 
   async proposeBlock() {
     console.log("Time of proposeblock start execution ", Date.now());
     this.selectedProposer = null;
     this.validatorBlock = null;
     this.voteTimestamp = null;
+    this.evalVoteTimestamp = null;
 
     const lastBlock = this.lastBlock;
     const lastBlockHash = lastBlock.hash;
@@ -1310,21 +1307,27 @@ class Chain {
       `${this.selectedProposer.address} has been selected as the block proposer`
     );
 
-    const nextProposalTime =
-      lastBlock.timestamp +
-      this.blockTime +
-      (this.chain.length > 1 ? this.voteTimeout : 0);
+    const blockCreationTime = lastBlock.timestamp + this.blockTime;
 
-    this.voteTimestamp = nextProposalTime + this.voteTimeout;
+    const proposalTime = blockCreationTime + this.proposalOffset;
+
+    this.voteTimestamp = proposalTime + this.voteOffset;
+    this.evalVoteTimestamp = this.voteTimestamp + this.evalVoteOffset;
+
+    console.log("Important timestamps:");
+    console.log("Block Creation: ", blockCreationTime);
+    console.log("Block Proposal: ", proposalTime);
+    console.log("Validator Voting: ", this.voteTimestamp);
+    console.log("Vote Evaluation: ", this.evalVoteTimestamp);
 
     if (NODE_ADDRESS!) {
       const isNodeEligible = this.eligibleValidators.some(
         (node) => node.address === NODE_ADDRESS!
       );
       if (isNodeEligible) {
-        const delay = nextProposalTime - Date.now();
+        const delay = blockCreationTime - Date.now();
         console.log(
-          `Creating block at ${nextProposalTime}. Waiting ${delay}ms...`
+          `Creating block at ${blockCreationTime}. Waiting ${delay}ms...`
         );
         await this.delay(delay > 0 ? delay : 0);
 
@@ -1362,7 +1365,7 @@ class Chain {
         );
 
         this.validatorBlock = newBlock;
-        console.log("Validator block set");
+        console.log("Validator block set at ", Date.now());
 
         // Broadcast the proposed block to the network
         if (this.selectedProposer.address === NODE_ADDRESS!) {
@@ -1374,12 +1377,18 @@ class Chain {
               data: newBlock.toJSON(),
             }; //add signing with private key, send public key and address, and then in handle proposed block verify the sign and then make sure the public key matches the address recieved
 
-            await this.delay(500);
+            const delay = proposalTime - Date.now();
+            console.log(
+              `Proposing block at ${proposalTime}. Waiting ${delay}ms...`
+            );
+            await this.delay(delay > 0 ? delay : 0);
 
             this.p2pServer.broadcast(proposedBlockMessage);
             console.log(
-              "Proposed block broadcasted for voting:",
-              newBlock.hash
+              "Proposed block broadcasted for voting",
+              newBlock.hash,
+              " at ",
+              Date.now()
             );
 
             this.proposedBlocks.set(newBlock.hash, {
@@ -1389,13 +1398,13 @@ class Chain {
             });
 
             // Append the block to the chain file
-            this.appendBlockToFile(newBlock);
+            //this.appendBlockToFile(newBlock);
 
-            const voteDelay = this.voteTimestamp - Date.now();
+            const evalVoteDelay = this.evalVoteTimestamp! - Date.now();
             console.log(
-              `Evalulating votes at ${this.voteTimestamp}. Waiting ${voteDelay}ms...`
+              `Evalulating votes at ${this.evalVoteTimestamp}. Waiting ${evalVoteDelay}ms...`
             );
-            await this.delay(voteDelay);
+            await this.delay(evalVoteDelay);
             this.evaluateVotes(newBlock.hash);
           }
 
@@ -1559,9 +1568,15 @@ class Chain {
       console.log(`Proposed block ${proposedBlock.hash} is invalid. Ignoring.`);
       return; // Stop processing invalid blocks
     }
-    await this.delay(500);
+
     // If this node has a validatorBlock, vote for its own block
     if (NODE_ADDRESS! && NODE_PRIVATE_KEY! && this.validatorBlock) {
+      const delay = this.voteTimestamp! - Date.now();
+      console.log("Voting at ", this.voteTimestamp!, "waiting ", delay, "ms");
+      await this.delay(delay > 0 ? delay : 0);
+
+      console.log("Voting for block at", Date.now());
+
       const ownBlock = this.validatorBlock as Block;
       console.log("Own Hash B ", ownBlock.hash);
       ownBlock.timestamp = proposedBlock.timestamp;
@@ -1569,7 +1584,7 @@ class Chain {
       const voteHash = ownBlock.hash;
 
       // Append the block to the chain file
-      this.appendBlockToFile(ownBlock);
+      // this.appendBlockToFile(ownBlock);
 
       const sign = crypto.createSign("SHA256");
       sign.update(voteHash).end();
@@ -1601,16 +1616,18 @@ class Chain {
       // Initialize the proposed block with no votes
       this.storeProposedBlock(proposedBlock.hash, proposedBlock);
     }
-    let voteDelay = this.voteTimeout;
+    let evalVoteDelay = this.evalVoteOffset;
 
-    if (this.voteTimestamp) {
-      voteDelay = this.voteTimestamp - Date.now();
+    if (this.evalVoteTimestamp) {
+      evalVoteDelay = this.evalVoteTimestamp - Date.now();
     }
     console.log(
-      `Waiting ${voteDelay > 0 ? voteDelay : 0}ms to evaluate votes...`
+      `Evaluating votes at  ${this.evalVoteTimestamp}: Waiting ${
+        evalVoteDelay > 0 ? evalVoteDelay : 0
+      }ms to evaluate votes...`
     );
 
-    await this.delay(voteDelay);
+    await this.delay(evalVoteDelay);
     this.evaluateVotes(proposedBlock.hash);
   }
 

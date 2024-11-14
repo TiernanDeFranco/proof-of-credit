@@ -957,6 +957,7 @@ class Chain {
         }
     }
     async proposeBlock() {
+        console.log("Time of proposeblock start execution ", Date.now());
         this.selectedProposer = null;
         this.validatorBlock = null;
         this.voteTimestamp = null;
@@ -993,6 +994,7 @@ class Chain {
                 newBlock.accountBalances = this.consolidateAccountBalances(newBlock.transactions, newBlock.fees);
                 newBlock.creditScores = this.consolidateCreditScores(newBlock.creditLedger);
                 this.validatorBlock = newBlock;
+                console.log("Validator block set at ", Date.now());
                 // Broadcast the proposed block to the network
                 if (this.selectedProposer.address === NODE_ADDRESS) {
                     // Broadcast the proposed block if this node is the proposer
@@ -1131,14 +1133,15 @@ class Chain {
     async handleProposedBlock(proposedBlockData) {
         const proposedBlock = Block.fromJSON(proposedBlockData);
         console.log(`Received proposed block: ${proposedBlock.hash}`);
-        const lastBlock = Chain.instance.lastBlock;
+        const lastBlock = this.lastBlock;
         if (!this.isValidBlock(proposedBlock, lastBlock)) {
             console.log(`Proposed block ${proposedBlock.hash} is invalid. Ignoring.`);
             return; // Stop processing invalid blocks
         }
+        await this.delay(500);
         // If this node has a validatorBlock, vote for its own block
-        if (NODE_ADDRESS && NODE_PRIVATE_KEY && Chain.instance.validatorBlock) {
-            const ownBlock = Chain.instance.validatorBlock;
+        if (NODE_ADDRESS && NODE_PRIVATE_KEY && this.validatorBlock) {
+            const ownBlock = this.validatorBlock;
             console.log("Own Hash B ", ownBlock.hash);
             ownBlock.timestamp = proposedBlock.timestamp;
             console.log("Own Hash A ", ownBlock.hash);
@@ -1161,7 +1164,6 @@ class Chain {
                         address: NODE_ADDRESS,
                     },
                 };
-                await this.delay(500);
                 this.p2pServer.broadcast(voteMessage);
                 console.log(`Voted for block: ${voteHash}`);
             }
