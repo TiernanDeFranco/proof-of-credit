@@ -1393,6 +1393,8 @@ class Chain {
               },
             }; //add signing with private key, send public key and address, and then in handle proposed block verify the sign and then make sure the public key matches the address recieved
 
+            this.proposedBlock = newBlock;
+
             const delay = proposalTime - Date.now();
             console.log(
               `Proposing block at ${proposalTime}. Waiting ${delay}ms...`
@@ -1572,13 +1574,15 @@ class Chain {
   }
 
   // --- Voting Mechanism Methods ---
-
+  proposedBlock: Block | null = null;
   // Method to handle incoming proposed blocks
   async handleProposedBlock(proposedBlockData: any) {
     this.isProposing = false;
     const { block, publicKey, signature, address } = proposedBlockData;
 
     const proposedBlock = Block.fromJSON(block);
+
+    this.proposedBlock = proposedBlock;
 
     console.log(`Received proposed block: ${proposedBlock.hash}`);
 
@@ -1705,6 +1709,12 @@ class Chain {
 
   // Method to handle incoming votes
   handleVote(voteData: any) {
+    if (!this.proposedBlock) {
+      console.log(`Lacking the proposed block. Requesting full chain sync.`);
+      this.p2pServer?.requestChainFromPeers();
+      return;
+    }
+
     const { blockHash, signature, publicKey, address } = voteData;
 
     if (!blockHash || !signature || !publicKey || !address) {
@@ -1740,22 +1750,16 @@ class Chain {
     // Iterate through all proposed blocks to find a match
     const proposal = this.proposedBlocks.get(blockHash);
 
-    if (!proposal) {
-      console.log(
-        `No proposal found for hash: ${blockHash}. Requesting full chain sync.`
-      );
-      this.p2pServer?.requestChainFromPeers();
-      return;
-    }
+    if (proposal) {
+      if (proposal.voters.includes(address)) {
+        console.log(`Duplicate vote detected from ${address}. Ignoring.`);
+        return;
+      }
 
-    if (proposal.voters.includes(address)) {
-      console.log(`Duplicate vote detected from ${address}. Ignoring.`);
-      return;
+      proposal.votes.push(blockHash); // This keeps track of the block hashes being voted on
+      proposal.voters.push(address); // This ensures a node can't vote multiple times
+      console.log(`Vote accepted for block hash: ${blockHash} from ${address}`);
     }
-
-    proposal.votes.push(blockHash); // This keeps track of the block hashes being voted on
-    proposal.voters.push(address); // This ensures a node can't vote multiple times
-    console.log(`Vote accepted for block hash: ${blockHash} from ${address}`);
   }
 
   // Method to evaluate votes for a proposed block

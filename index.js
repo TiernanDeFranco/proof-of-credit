@@ -355,6 +355,8 @@ class Chain {
         this.evalVoteOffset = 10000;
         this.voteTimestamp = null;
         this.evalVoteTimestamp = null;
+        // --- Voting Mechanism Methods ---
+        this.proposedBlock = null;
         this.createGenesisBlock();
     }
     setP2PServer(server) {
@@ -1024,6 +1026,7 @@ class Chain {
                                 address: NODE_ADDRESS,
                             },
                         }; //add signing with private key, send public key and address, and then in handle proposed block verify the sign and then make sure the public key matches the address recieved
+                        this.proposedBlock = newBlock;
                         const delay = proposalTime - Date.now();
                         console.log(`Proposing block at ${proposalTime}. Waiting ${delay}ms...`);
                         await this.delay(delay > 0 ? delay : 0);
@@ -1151,13 +1154,13 @@ class Chain {
         const currentReward = Math.max(this.initialMintingReward / Math.pow(2, intervalsPassed), this.minimumReward);
         return Math.floor(currentReward);
     }
-    // --- Voting Mechanism Methods ---
     // Method to handle incoming proposed blocks
     async handleProposedBlock(proposedBlockData) {
         var _a;
         this.isProposing = false;
         const { block, publicKey, signature, address } = proposedBlockData;
         const proposedBlock = Block.fromJSON(block);
+        this.proposedBlock = proposedBlock;
         console.log(`Received proposed block: ${proposedBlock.hash}`);
         const verify = crypto.createVerify("SHA256");
         verify.update(proposedBlock.hash);
@@ -1257,6 +1260,11 @@ class Chain {
     // Method to handle incoming votes
     handleVote(voteData) {
         var _a;
+        if (!this.proposedBlock) {
+            console.log(`Lacking the proposed block. Requesting full chain sync.`);
+            (_a = this.p2pServer) === null || _a === void 0 ? void 0 : _a.requestChainFromPeers();
+            return;
+        }
         const { blockHash, signature, publicKey, address } = voteData;
         if (!blockHash || !signature || !publicKey || !address) {
             console.log("Malformed vote data. Ignoring vote.");
@@ -1282,18 +1290,15 @@ class Chain {
         }
         // Iterate through all proposed blocks to find a match
         const proposal = this.proposedBlocks.get(blockHash);
-        if (!proposal) {
-            console.log(`No proposal found for hash: ${blockHash}. Requesting full chain sync.`);
-            (_a = this.p2pServer) === null || _a === void 0 ? void 0 : _a.requestChainFromPeers();
-            return;
+        if (proposal) {
+            if (proposal.voters.includes(address)) {
+                console.log(`Duplicate vote detected from ${address}. Ignoring.`);
+                return;
+            }
+            proposal.votes.push(blockHash); // This keeps track of the block hashes being voted on
+            proposal.voters.push(address); // This ensures a node can't vote multiple times
+            console.log(`Vote accepted for block hash: ${blockHash} from ${address}`);
         }
-        if (proposal.voters.includes(address)) {
-            console.log(`Duplicate vote detected from ${address}. Ignoring.`);
-            return;
-        }
-        proposal.votes.push(blockHash); // This keeps track of the block hashes being voted on
-        proposal.voters.push(address); // This ensures a node can't vote multiple times
-        console.log(`Vote accepted for block hash: ${blockHash} from ${address}`);
     }
     // Method to evaluate votes for a proposed block
     async evaluateVotes(proposedHash) {
