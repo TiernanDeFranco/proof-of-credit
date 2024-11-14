@@ -409,6 +409,8 @@ class Chain {
   initialMintingReward = 100;
   minimumReward = 1;
 
+  isProposing: boolean = false;
+
   selectedProposer: Node | null = null;
 
   validatorBlock: Block | null = null;
@@ -925,12 +927,11 @@ class Chain {
       )
       .sort((a, b) => a.address.localeCompare(b.address));
 
-    console.log(this.eligibleValidators);
-
     if (this.eligibleValidators.length === 0) {
-      console.log("No eligible validators found.");
-      return null;
+      this.eligibleValidators = [...this.connectedNodes];
     }
+
+    console.log(this.eligibleValidators);
 
     const hashInput = prevHash || "defaultFallbackHash";
     const hash = crypto.createHash("SHA256").update(hashInput).digest("hex");
@@ -1289,17 +1290,16 @@ class Chain {
   evalVoteTimestamp: number | null = null;
 
   async proposeBlock() {
+    this.isProposing = true;
     console.log("Time of proposeblock start execution ", Date.now());
-    this.selectedProposer = null;
-    this.validatorBlock = null;
-    this.voteTimestamp = null;
-    this.evalVoteTimestamp = null;
 
     const lastBlock = this.lastBlock;
     const lastBlockHash = lastBlock.hash;
 
-    this.selectedProposer =
-      this.selectDeterministicBlockProposer(lastBlockHash);
+    if (!this.selectedProposer) {
+      this.selectedProposer =
+        this.selectDeterministicBlockProposer(lastBlockHash);
+    }
     if (!this.selectedProposer) {
       console.log("No eligible validator available to propose the block.");
       return;
@@ -1406,7 +1406,7 @@ class Chain {
               " at ",
               Date.now()
             );
-
+            this.isProposing = false;
             this.proposedBlocks.set(newBlock.hash, {
               block: newBlock,
               votes: [],
@@ -1575,6 +1575,7 @@ class Chain {
 
   // Method to handle incoming proposed blocks
   async handleProposedBlock(proposedBlockData: any) {
+    this.isProposing = false;
     const { block, publicKey, signature, address } = proposedBlockData;
 
     const proposedBlock = Block.fromJSON(block);
@@ -1907,6 +1908,11 @@ class Chain {
     // Remove the proposal from the map
     this.proposedBlocks.delete(proposedHash);
 
+    this.selectedProposer = null;
+    this.validatorBlock = null;
+    this.voteTimestamp = null;
+    this.evalVoteTimestamp = null;
+
     this.proposeBlock();
   }
 }
@@ -2209,11 +2215,6 @@ class P2PServer {
 
     Chain.instance.eligibleValidators = message.data.validators || [];
 
-    if (!Chain.instance.selectedProposer) {
-      Chain.instance.selectedProposer = message.data.selectedProposer;
-      console.log("Selected Proposer: ", message.data.selectedProposer);
-    }
-
     nodeList.forEach((address) => {
       const existingNode = Chain.instance.connectedNodes.find(
         (node) => node.address === address
@@ -2229,13 +2230,18 @@ class P2PServer {
         a.address.localeCompare(b.address)
       )
     );
+
+    if (!Chain.instance.selectedProposer) {
+      Chain.instance.selectedProposer = message.data.selectedProposer;
+      console.log("Selected Proposer: ", message.data.selectedProposer);
+    }
   }
 
   private getNodeWalletAddress(): string {
     return NODE_ADDRESS!;
   }
 
-  private handleChainResponse(chainData: any[]) {
+  private async handleChainResponse(chainData: any[]) {
     const receivedChain = chainData.map((blockData) =>
       Block.fromJSON(blockData)
     );
@@ -2247,6 +2253,16 @@ class P2PServer {
       console.log("Received chain is valid. Replacing the current chain.");
       // Broadcast the updated chain to other peers
       this.broadcastChain();
+
+      await Chain.instance.delay(5000);
+
+      if (!Chain.instance.isProposing) {
+        console.log(
+          "The selected proposer before proposing is:",
+          Chain.instance.selectedProposer
+        );
+        Chain.instance.proposeBlock();
+      }
     } else {
       console.log("Received chain is invalid or shorter. Ignoring.");
     }
@@ -2301,6 +2317,7 @@ class P2PServer {
       data: {
         nodes: connectedNodes || [],
         validators: Chain.instance.eligibleValidators || [],
+        selectedProposer: Chain.instance.selectedProposer!,
       },
     };
     this.broadcast(message, excludeSocket);

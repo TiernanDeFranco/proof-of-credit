@@ -340,6 +340,7 @@ class Chain {
         this.eligibleValidators = [];
         this.initialMintingReward = 100;
         this.minimumReward = 1;
+        this.isProposing = false;
         this.selectedProposer = null;
         this.validatorBlock = null;
         // Reference to the P2P Server
@@ -703,11 +704,10 @@ class Chain {
         this.eligibleValidators = [...this.connectedNodes]
             .filter((miner) => this.getLatestCreditScoreFromChain(miner.address) >= threshold)
             .sort((a, b) => a.address.localeCompare(b.address));
-        console.log(this.eligibleValidators);
         if (this.eligibleValidators.length === 0) {
-            console.log("No eligible validators found.");
-            return null;
+            this.eligibleValidators = [...this.connectedNodes];
         }
+        console.log(this.eligibleValidators);
         const hashInput = prevHash || "defaultFallbackHash";
         const hash = crypto.createHash("SHA256").update(hashInput).digest("hex");
         const hashValue = BigInt("0x" + hash);
@@ -961,15 +961,14 @@ class Chain {
         }
     }
     async proposeBlock() {
+        this.isProposing = true;
         console.log("Time of proposeblock start execution ", Date.now());
-        this.selectedProposer = null;
-        this.validatorBlock = null;
-        this.voteTimestamp = null;
-        this.evalVoteTimestamp = null;
         const lastBlock = this.lastBlock;
         const lastBlockHash = lastBlock.hash;
-        this.selectedProposer =
-            this.selectDeterministicBlockProposer(lastBlockHash);
+        if (!this.selectedProposer) {
+            this.selectedProposer =
+                this.selectDeterministicBlockProposer(lastBlockHash);
+        }
         if (!this.selectedProposer) {
             console.log("No eligible validator available to propose the block.");
             return;
@@ -1030,6 +1029,7 @@ class Chain {
                         await this.delay(delay > 0 ? delay : 0);
                         this.p2pServer.broadcast(proposedBlockMessage);
                         console.log("Proposed block broadcasted for voting", newBlock.hash, " at ", Date.now());
+                        this.isProposing = false;
                         this.proposedBlocks.set(newBlock.hash, {
                             block: newBlock,
                             votes: [],
@@ -1155,6 +1155,7 @@ class Chain {
     // Method to handle incoming proposed blocks
     async handleProposedBlock(proposedBlockData) {
         var _a;
+        this.isProposing = false;
         const { block, publicKey, signature, address } = proposedBlockData;
         const proposedBlock = Block.fromJSON(block);
         console.log(`Received proposed block: ${proposedBlock.hash}`);
@@ -1283,7 +1284,7 @@ class Chain {
         if (!proposal) {
             console.log(`No proposal found for block hash: ${blockHash}`);
             const filePath = path_1.default.join("D:/Chains", `${this.chain.length}.txt`);
-            const blockData = JSON.stringify(blockHash.toJSON(), null, 2);
+            const blockData = JSON.stringify(proposal, null, 2);
             try {
                 fs_1.default.writeFileSync(filePath, blockData);
                 console.log(`Block data written to file: ${filePath}`);
@@ -1313,7 +1314,7 @@ class Chain {
         const totalVotes = proposal.votes.length + 1;
         if (totalVotes == 1 || totalVotes == 2) {
             const blockIndex = proposal.block.index;
-            const filePath = path_1.default.join("D:/Chains", `${blockIndex}-votes:${totalVotes}.txt`);
+            const filePath = path_1.default.join("D:/Chains", `${blockIndex}-votes-${totalVotes}.txt`);
             const blockData = JSON.stringify(proposal.block.toJSON(), null, 2);
             try {
                 fs_1.default.writeFileSync(filePath, blockData);
@@ -1373,6 +1374,10 @@ class Chain {
         }
         // Remove the proposal from the map
         this.proposedBlocks.delete(proposedHash);
+        this.selectedProposer = null;
+        this.validatorBlock = null;
+        this.voteTimestamp = null;
+        this.evalVoteTimestamp = null;
         this.proposeBlock();
     }
 }
@@ -1611,10 +1616,6 @@ class P2PServer {
     handleNewNodeList(message) {
         const nodeList = message.data.nodes || [];
         Chain.instance.eligibleValidators = message.data.validators || [];
-        if (!Chain.instance.selectedProposer) {
-            Chain.instance.selectedProposer = message.data.selectedProposer;
-            console.log("Selected Proposer: ", message.data.selectedProposer);
-        }
         nodeList.forEach((address) => {
             const existingNode = Chain.instance.connectedNodes.find((node) => node.address === address);
             if (!existingNode) {
@@ -1623,11 +1624,15 @@ class P2PServer {
             }
         });
         console.log("Synchronized connected nodes:", Chain.instance.connectedNodes.sort((a, b) => a.address.localeCompare(b.address)));
+        if (!Chain.instance.selectedProposer) {
+            Chain.instance.selectedProposer = message.data.selectedProposer;
+            console.log("Selected Proposer: ", message.data.selectedProposer);
+        }
     }
     getNodeWalletAddress() {
         return NODE_ADDRESS;
     }
-    handleChainResponse(chainData) {
+    async handleChainResponse(chainData) {
         const receivedChain = chainData.map((blockData) => Block.fromJSON(blockData));
         if (receivedChain.length > Chain.instance.chain.length &&
             Chain.instance.isValidChain(receivedChain)) {
@@ -1635,6 +1640,11 @@ class P2PServer {
             console.log("Received chain is valid. Replacing the current chain.");
             // Broadcast the updated chain to other peers
             this.broadcastChain();
+            await Chain.instance.delay(5000);
+            if (!Chain.instance.isProposing) {
+                console.log("The selected proposer before proposing is:", Chain.instance.selectedProposer);
+                Chain.instance.proposeBlock();
+            }
         }
         else {
             console.log("Received chain is invalid or shorter. Ignoring.");
@@ -1684,6 +1694,7 @@ class P2PServer {
             data: {
                 nodes: connectedNodes || [],
                 validators: Chain.instance.eligibleValidators || [],
+                selectedProposer: Chain.instance.selectedProposer,
             },
         };
         this.broadcast(message, excludeSocket);
