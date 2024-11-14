@@ -1280,8 +1280,8 @@ class Chain {
 
   blockTime = 20_000;
   proposalOffset = 1_000;
-  voteOffset = 10_000;
-  evalVoteOffset = 5_000;
+  voteOffset = 5_000;
+  evalVoteOffset = 10_000;
 
   voteTimestamp: number | null = null;
   evalVoteTimestamp: number | null = null;
@@ -1562,12 +1562,8 @@ class Chain {
     const proposedBlock = Block.fromJSON(proposedBlockData);
 
     console.log(`Received proposed block: ${proposedBlock.hash}`);
-
-    const lastBlock = this.lastBlock;
-    if (!this.isValidBlock(proposedBlock, lastBlock)) {
-      console.log(`Proposed block ${proposedBlock.hash} is invalid. Ignoring.`);
-      return; // Stop processing invalid blocks
-    }
+    // Initialize the proposed block with no votes
+    this.storeProposedBlock(proposedBlock.hash, proposedBlock);
 
     // If this node has a validatorBlock, vote for its own block
     if (NODE_ADDRESS! && NODE_PRIVATE_KEY! && this.validatorBlock) {
@@ -1609,12 +1605,9 @@ class Chain {
         console.log(`Voted for block: ${voteHash}`);
       }
 
-      // Include own vote immediately when storing the proposed block
       this.storeProposedBlock(proposedBlock.hash, proposedBlock, voteHash);
     } else {
       console.log("Validator block is not available, not voting");
-      // Initialize the proposed block with no votes
-      this.storeProposedBlock(proposedBlock.hash, proposedBlock);
     }
     let evalVoteDelay = this.evalVoteOffset;
 
@@ -1632,18 +1625,30 @@ class Chain {
   }
 
   storeProposedBlock(hash: string, block: Block, ownHash?: string) {
+    if (ownHash) {
+      const proposal = this.proposedBlocks.get(hash);
+      if (proposal) {
+        proposal.votes.push(ownHash);
+        proposal.voters.push(NODE_ADDRESS!);
+        console.log(`Voted for proposal for block ${hash}`);
+      } else {
+        this.proposedBlocks.set(hash, {
+          block: block,
+          votes: [ownHash],
+          voters: [NODE_ADDRESS!],
+        });
+        console.log(`Voted on initial proposal for block ${hash}`);
+      }
+      return;
+    }
+
     if (!this.proposedBlocks.has(hash)) {
       this.proposedBlocks.set(hash, {
         block: block,
-        votes: ownHash ? [ownHash] : [],
-        voters: ownHash ? [NODE_ADDRESS!] : [],
+        votes: [],
+        voters: [],
       });
-    } else if (ownHash) {
-      const proposal = this.proposedBlocks.get(hash);
-      if (proposal && !proposal.votes.includes(ownHash)) {
-        proposal.votes.push(ownHash);
-        proposal.voters.push(NODE_ADDRESS!);
-      }
+      console.log(`Initialized proposal for block ${hash}`);
     }
   }
 
@@ -1685,6 +1690,15 @@ class Chain {
 
     if (!proposal) {
       console.log(`No proposal found for block hash: ${blockHash}`);
+      const filePath = path.join("D:/Chains", `${this.chain.length}.txt`);
+      const blockData = JSON.stringify(blockHash.toJSON(), null, 2);
+
+      try {
+        fs.writeFileSync(filePath, blockData);
+        console.log(`Block data written to file: ${filePath}`);
+      } catch (error) {
+        console.error(`Failed to write block data to file: ${error}`);
+      }
       return;
     }
 
@@ -1708,9 +1722,12 @@ class Chain {
     }
 
     const totalVotes = proposal.votes.length + 1;
-    if (totalVotes == 1) {
+    if (totalVotes == 1 || totalVotes == 2) {
       const blockIndex = proposal.block.index; // Assuming `proposal.block.index` holds the index of the block
-      const filePath = path.join("D:/Chains", `${blockIndex}.txt`);
+      const filePath = path.join(
+        "D:/Chains",
+        `${blockIndex}-votes:${totalVotes}.txt`
+      );
       const blockData = JSON.stringify(proposal.block.toJSON(), null, 2);
 
       try {
@@ -1748,8 +1765,6 @@ class Chain {
 
     // Remove the proposal from the map
     this.proposedBlocks.delete(proposedHash);
-
-    await this.delay(500);
 
     this.proposeBlock();
   }
