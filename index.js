@@ -495,17 +495,19 @@ class Chain {
         // Recalculate the hash and compare
         const proposerAddress = (_a = this.selectedProposer) === null || _a === void 0 ? void 0 : _a.address; // Retrieve the proposer address
         const blockRewards = newBlock.creditLedger.filter((credit) => credit.reason === "Block Reward");
-        const blockReward = blockRewards[0]; // Since we enforce only one, take the first
-        if (proposerAddress) {
-            if (blockReward.amount !== this.blockCreditReward ||
-                blockReward.receiver !== proposerAddress) {
-                console.log(`Invalid block: "Block Reward" credit is incorrect. Amount: ${blockReward.amount}, Receiver: ${blockReward.receiver}, Expected Amount: ${this.blockCreditReward}, Expected Receiver: ${proposerAddress}.`);
+        if (blockRewards.length > 0) {
+            const blockReward = blockRewards[0]; // Since we enforce only one, take the first
+            if (proposerAddress) {
+                if (blockReward.amount !== this.blockCreditReward ||
+                    blockReward.receiver !== proposerAddress) {
+                    console.log(`Invalid block: "Block Reward" credit is incorrect. Amount: ${blockReward.amount}, Receiver: ${blockReward.receiver}, Expected Amount: ${this.blockCreditReward}, Expected Receiver: ${proposerAddress}.`);
+                    return false;
+                }
+            }
+            if (blockRewards.length > 1) {
+                console.log(`Invalid block: Expected 1 or 0 "Block Reward" credit, but found ${blockRewards.length}.`);
                 return false;
             }
-        }
-        if (blockRewards.length !== 1) {
-            console.log(`Invalid block: Expected exactly 1 "Block Reward" credit, but found ${blockRewards.length}.`);
-            return false;
         }
         const invalidNetworkParticipation = newBlock.creditLedger.find((credit) => credit.reason === "Network Participation" && credit.amount > 10);
         if (invalidNetworkParticipation) {
@@ -1007,10 +1009,21 @@ class Chain {
                 if (this.selectedProposer.address === NODE_ADDRESS) {
                     // Broadcast the proposed block if this node is the proposer
                     if (this.p2pServer) {
+                        const blockHash = newBlock.hash;
+                        const sign = crypto.createSign("SHA256");
+                        sign.update(blockHash);
+                        sign.end();
+                        const signature = sign.sign(NODE_PRIVATE_KEY, "hex");
+                        const proposedPublicKey = new Wallet(NODE_PRIVATE_KEY).publicKey;
                         const proposedBlockMessage = {
                             id: (0, uuid_1.v4)(),
                             type: MessageType.PROPOSED_BLOCK,
-                            data: newBlock.toJSON(),
+                            data: {
+                                block: newBlock.toJSON(),
+                                signature,
+                                publicKey: proposedPublicKey,
+                                address: NODE_ADDRESS,
+                            },
                         }; //add signing with private key, send public key and address, and then in handle proposed block verify the sign and then make sure the public key matches the address recieved
                         const delay = proposalTime - Date.now();
                         console.log(`Proposing block at ${proposalTime}. Waiting ${delay}ms...`);
@@ -1141,8 +1154,31 @@ class Chain {
     // --- Voting Mechanism Methods ---
     // Method to handle incoming proposed blocks
     async handleProposedBlock(proposedBlockData) {
-        const proposedBlock = Block.fromJSON(proposedBlockData);
+        var _a;
+        const { block, publicKey, signature, address } = proposedBlockData;
+        const proposedBlock = Block.fromJSON(block);
         console.log(`Received proposed block: ${proposedBlock.hash}`);
+        const verify = crypto.createVerify("SHA256");
+        verify.update(proposedBlock.hash);
+        verify.end();
+        const isValid = verify.verify(publicKey, signature, "hex");
+        const hashedPublicKey = crypto
+            .createHash("sha256")
+            .update(publicKey)
+            .digest("hex");
+        const generatedAddress = WalletIDPrepend + hashedPublicKey.slice(0, 30 - WalletIDPrepend.length);
+        if (generatedAddress !== address) {
+            console.log(`Address included in block from ${address} and address regenerated from the public key for validation is invalid. Ignoring block.`);
+            return;
+        }
+        if (!isValid) {
+            console.log(`Invalid vote signature from ${address}. Ignoring block.`);
+            return;
+        }
+        if (generatedAddress !== ((_a = this.selectedProposer) === null || _a === void 0 ? void 0 : _a.address)) {
+            console.log(`Address included in block from ${address} and address isn't from the selected proposer. Ignoring block.`);
+            return;
+        }
         // Initialize the proposed block with no votes
         this.storeProposedBlock(proposedBlock.hash, proposedBlock);
         // If this node has a validatorBlock, vote for its own block
@@ -1191,19 +1227,30 @@ class Chain {
         this.evaluateVotes(proposedBlock.hash);
     }
     storeProposedBlock(hash, block, ownHash) {
+        if (ownHash) {
+            const proposal = this.proposedBlocks.get(hash);
+            if (proposal) {
+                proposal.votes.push(ownHash);
+                proposal.voters.push(NODE_ADDRESS);
+                console.log(`Voted for proposal for block ${hash}`);
+            }
+            else {
+                this.proposedBlocks.set(hash, {
+                    block: block,
+                    votes: [ownHash],
+                    voters: [NODE_ADDRESS],
+                });
+                console.log(`Voted on initial proposal for block ${hash}`);
+            }
+            return;
+        }
         if (!this.proposedBlocks.has(hash)) {
             this.proposedBlocks.set(hash, {
                 block: block,
-                votes: ownHash ? [ownHash] : [],
-                voters: ownHash ? [NODE_ADDRESS] : [],
+                votes: [],
+                voters: [],
             });
-        }
-        else if (ownHash) {
-            const proposal = this.proposedBlocks.get(hash);
-            if (proposal && !proposal.votes.includes(ownHash)) {
-                proposal.votes.push(ownHash);
-                proposal.voters.push(NODE_ADDRESS);
-            }
+            console.log(`Initialized proposal for block ${hash}`);
         }
     }
     // Method to handle incoming votes
@@ -1216,6 +1263,7 @@ class Chain {
         console.log(`Received vote for block hash: ${blockHash} from ${address}`);
         const verify = crypto.createVerify("SHA256");
         verify.update(blockHash);
+        verify.end();
         const isValid = verify.verify(publicKey, signature, "hex");
         const hashedPublicKey = crypto
             .createHash("sha256")
@@ -1255,6 +1303,7 @@ class Chain {
     }
     // Method to evaluate votes for a proposed block
     async evaluateVotes(proposedHash) {
+        var _a, _b, _c, _d;
         console.log("EVALUATING VOTES at", Date.now());
         const proposal = this.proposedBlocks.get(proposedHash);
         if (!proposal) {
@@ -1263,7 +1312,7 @@ class Chain {
         }
         const totalVotes = proposal.votes.length + 1;
         if (totalVotes == 1 || totalVotes == 2) {
-            const blockIndex = proposal.block.index; // Assuming `proposal.block.index` holds the index of the block
+            const blockIndex = proposal.block.index;
             const filePath = path_1.default.join("D:/Chains", `${blockIndex}-votes:${totalVotes}.txt`);
             const blockData = JSON.stringify(proposal.block.toJSON(), null, 2);
             try {
@@ -1284,8 +1333,43 @@ class Chain {
                 console.log("Proposed block accepted and added to the chain:", proposedHash);
             }
         }
+        else if (percentage < 75 && percentage >= 33) {
+            // Create an empty block
+            const emptyBlock = new Block(this.chain.length, this.lastBlock.hash, [], [], [], [], [], [], [], proposal.block.timestamp);
+            // Add the empty block to the chain
+            const blockAdded = this.addBlock(emptyBlock);
+            if (blockAdded) {
+                console.log(`Proposed block ${proposedHash} received insufficient votes. An empty block was created.`);
+            }
+        }
+        else if (percentage < 33 && percentage >= 15) {
+            const halvedCredit = this.getLatestCreditScoreFromChain((_a = this.selectedProposer) === null || _a === void 0 ? void 0 : _a.address) / 2;
+            // Create an empty block
+            const creditHalfBlock = new Block(this.chain.length, this.lastBlock.hash, [], [], [], [
+                new Credit(-halvedCredit, (_b = this.selectedProposer) === null || _b === void 0 ? void 0 : _b.address, "Proposed Malicious Block - Halved"),
+            ], [], [], [], proposal.block.timestamp);
+            creditHalfBlock.creditScores = this.consolidateCreditScores(creditHalfBlock.creditLedger);
+            // Add the empty block to the chain
+            const blockAdded = this.addBlock(creditHalfBlock);
+            if (blockAdded) {
+                console.log(`Proposed block ${proposedHash} was in superminority, proposer's score was halved`);
+            }
+        }
+        else if (percentage < 15) {
+            const credit = this.getLatestCreditScoreFromChain((_c = this.selectedProposer) === null || _c === void 0 ? void 0 : _c.address);
+            // Create an empty block
+            const noCreditBlock = new Block(this.chain.length, this.lastBlock.hash, [], [], [], [
+                new Credit(-credit, (_d = this.selectedProposer) === null || _d === void 0 ? void 0 : _d.address, "Proposed Malicious Block - Zeroed Out"),
+            ], [], [], [], proposal.block.timestamp);
+            noCreditBlock.creditScores = this.consolidateCreditScores(noCreditBlock.creditLedger);
+            // Add the empty block to the chain
+            const blockAdded = this.addBlock(noCreditBlock);
+            if (blockAdded) {
+                console.log(`Proposed block ${proposedHash} was in SUPER SUPER minority, proposer's score was set to 0`);
+            }
+        }
         else {
-            console.log(`Proposed block ${proposedHash} did not receive enough votes.`);
+            console.log(`Unhandled case for block ${proposedHash} with vote percentage ${percentage}.`);
         }
         // Remove the proposal from the map
         this.proposedBlocks.delete(proposedHash);
@@ -1527,6 +1611,10 @@ class P2PServer {
     handleNewNodeList(message) {
         const nodeList = message.data.nodes || [];
         Chain.instance.eligibleValidators = message.data.validators || [];
+        if (!Chain.instance.selectedProposer) {
+            Chain.instance.selectedProposer = message.data.selectedProposer;
+            console.log("Selected Proposer: ", message.data.selectedProposer);
+        }
         nodeList.forEach((address) => {
             const existingNode = Chain.instance.connectedNodes.find((node) => node.address === address);
             if (!existingNode) {
@@ -1610,6 +1698,7 @@ class P2PServer {
             data: {
                 nodes: connectedNodes || [],
                 validators: Chain.instance.eligibleValidators || [],
+                selectedProposer: Chain.instance.selectedProposer,
             },
         };
         socket.send(JSON.stringify(message));

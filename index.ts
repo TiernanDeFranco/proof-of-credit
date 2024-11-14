@@ -617,24 +617,26 @@ class Chain {
       (credit) => credit.reason === "Block Reward"
     );
 
-    const blockReward = blockRewards[0]; // Since we enforce only one, take the first
-    if (proposerAddress) {
-      if (
-        blockReward.amount !== this.blockCreditReward ||
-        blockReward.receiver !== proposerAddress
-      ) {
+    if (blockRewards.length > 0) {
+      const blockReward = blockRewards[0]; // Since we enforce only one, take the first
+      if (proposerAddress) {
+        if (
+          blockReward.amount !== this.blockCreditReward ||
+          blockReward.receiver !== proposerAddress
+        ) {
+          console.log(
+            `Invalid block: "Block Reward" credit is incorrect. Amount: ${blockReward.amount}, Receiver: ${blockReward.receiver}, Expected Amount: ${this.blockCreditReward}, Expected Receiver: ${proposerAddress}.`
+          );
+          return false;
+        }
+      }
+
+      if (blockRewards.length > 1) {
         console.log(
-          `Invalid block: "Block Reward" credit is incorrect. Amount: ${blockReward.amount}, Receiver: ${blockReward.receiver}, Expected Amount: ${this.blockCreditReward}, Expected Receiver: ${proposerAddress}.`
+          `Invalid block: Expected 1 or 0 "Block Reward" credit, but found ${blockRewards.length}.`
         );
         return false;
       }
-    }
-
-    if (blockRewards.length !== 1) {
-      console.log(
-        `Invalid block: Expected exactly 1 "Block Reward" credit, but found ${blockRewards.length}.`
-      );
-      return false;
     }
 
     const invalidNetworkParticipation = newBlock.creditLedger.find(
@@ -1371,10 +1373,24 @@ class Chain {
         if (this.selectedProposer.address === NODE_ADDRESS!) {
           // Broadcast the proposed block if this node is the proposer
           if (this.p2pServer) {
+            const blockHash = newBlock.hash;
+
+            const sign = crypto.createSign("SHA256");
+            sign.update(blockHash);
+            sign.end();
+            const signature = sign.sign(NODE_PRIVATE_KEY!, "hex");
+
+            const proposedPublicKey = new Wallet(NODE_PRIVATE_KEY!).publicKey;
+
             const proposedBlockMessage: IMessage = {
               id: uuidv4(),
               type: MessageType.PROPOSED_BLOCK,
-              data: newBlock.toJSON(),
+              data: {
+                block: newBlock.toJSON(),
+                signature,
+                publicKey: proposedPublicKey,
+                address: NODE_ADDRESS!,
+              },
             }; //add signing with private key, send public key and address, and then in handle proposed block verify the sign and then make sure the public key matches the address recieved
 
             const delay = proposalTime - Date.now();
@@ -1559,9 +1575,43 @@ class Chain {
 
   // Method to handle incoming proposed blocks
   async handleProposedBlock(proposedBlockData: any) {
-    const proposedBlock = Block.fromJSON(proposedBlockData);
+    const { block, publicKey, signature, address } = proposedBlockData;
+
+    const proposedBlock = Block.fromJSON(block);
 
     console.log(`Received proposed block: ${proposedBlock.hash}`);
+
+    const verify = crypto.createVerify("SHA256");
+    verify.update(proposedBlock.hash);
+    verify.end();
+    const isValid = verify.verify(publicKey, signature, "hex");
+
+    const hashedPublicKey = crypto
+      .createHash("sha256")
+      .update(publicKey)
+      .digest("hex");
+    const generatedAddress =
+      WalletIDPrepend + hashedPublicKey.slice(0, 30 - WalletIDPrepend.length);
+
+    if (generatedAddress !== address) {
+      console.log(
+        `Address included in block from ${address} and address regenerated from the public key for validation is invalid. Ignoring block.`
+      );
+      return;
+    }
+
+    if (!isValid) {
+      console.log(`Invalid vote signature from ${address}. Ignoring block.`);
+      return;
+    }
+
+    if (generatedAddress !== this.selectedProposer?.address) {
+      console.log(
+        `Address included in block from ${address} and address isn't from the selected proposer. Ignoring block.`
+      );
+      return;
+    }
+
     // Initialize the proposed block with no votes
     this.storeProposedBlock(proposedBlock.hash, proposedBlock);
 
@@ -1665,6 +1715,7 @@ class Chain {
 
     const verify = crypto.createVerify("SHA256");
     verify.update(blockHash);
+    verify.end();
     const isValid = verify.verify(publicKey, signature, "hex");
 
     const hashedPublicKey = crypto
@@ -1723,7 +1774,7 @@ class Chain {
 
     const totalVotes = proposal.votes.length + 1;
     if (totalVotes == 1 || totalVotes == 2) {
-      const blockIndex = proposal.block.index; // Assuming `proposal.block.index` holds the index of the block
+      const blockIndex = proposal.block.index;
       const filePath = path.join(
         "D:/Chains",
         `${blockIndex}-votes:${totalVotes}.txt`
@@ -1747,7 +1798,6 @@ class Chain {
         2
       )}%)`
     );
-
     if (percentage >= 75) {
       // Add the block to the chain
       const blockAdded = this.addBlock(proposal.block);
@@ -1757,9 +1807,100 @@ class Chain {
           proposedHash
         );
       }
+    } else if (percentage < 75 && percentage >= 33) {
+      // Create an empty block
+      const emptyBlock = new Block(
+        this.chain.length,
+        this.lastBlock.hash,
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+        proposal.block.timestamp
+      );
+
+      // Add the empty block to the chain
+      const blockAdded = this.addBlock(emptyBlock);
+      if (blockAdded) {
+        console.log(
+          `Proposed block ${proposedHash} received insufficient votes. An empty block was created.`
+        );
+      }
+    } else if (percentage < 33 && percentage >= 15) {
+      const halvedCredit =
+        this.getLatestCreditScoreFromChain(this.selectedProposer?.address!) / 2;
+      // Create an empty block
+      const creditHalfBlock = new Block(
+        this.chain.length,
+        this.lastBlock.hash,
+        [],
+        [],
+        [],
+        [
+          new Credit(
+            -halvedCredit,
+            this.selectedProposer?.address!,
+            "Proposed Malicious Block - Halved"
+          ),
+        ],
+        [],
+        [],
+        [],
+        proposal.block.timestamp
+      );
+
+      creditHalfBlock.creditScores = this.consolidateCreditScores(
+        creditHalfBlock.creditLedger
+      );
+
+      // Add the empty block to the chain
+      const blockAdded = this.addBlock(creditHalfBlock);
+      if (blockAdded) {
+        console.log(
+          `Proposed block ${proposedHash} was in superminority, proposer's score was halved`
+        );
+      }
+    } else if (percentage < 15) {
+      const credit = this.getLatestCreditScoreFromChain(
+        this.selectedProposer?.address!
+      );
+      // Create an empty block
+      const noCreditBlock = new Block(
+        this.chain.length,
+        this.lastBlock.hash,
+        [],
+        [],
+        [],
+        [
+          new Credit(
+            -credit,
+            this.selectedProposer?.address!,
+            "Proposed Malicious Block - Zeroed Out"
+          ),
+        ],
+        [],
+        [],
+        [],
+        proposal.block.timestamp
+      );
+
+      noCreditBlock.creditScores = this.consolidateCreditScores(
+        noCreditBlock.creditLedger
+      );
+
+      // Add the empty block to the chain
+      const blockAdded = this.addBlock(noCreditBlock);
+      if (blockAdded) {
+        console.log(
+          `Proposed block ${proposedHash} was in SUPER SUPER minority, proposer's score was set to 0`
+        );
+      }
     } else {
       console.log(
-        `Proposed block ${proposedHash} did not receive enough votes.`
+        `Unhandled case for block ${proposedHash} with vote percentage ${percentage}.`
       );
     }
 
@@ -2068,6 +2209,11 @@ class P2PServer {
 
     Chain.instance.eligibleValidators = message.data.validators || [];
 
+    if (!Chain.instance.selectedProposer) {
+      Chain.instance.selectedProposer = message.data.selectedProposer;
+      console.log("Selected Proposer: ", message.data.selectedProposer);
+    }
+
     nodeList.forEach((address) => {
       const existingNode = Chain.instance.connectedNodes.find(
         (node) => node.address === address
@@ -2170,6 +2316,7 @@ class P2PServer {
       data: {
         nodes: connectedNodes || [],
         validators: Chain.instance.eligibleValidators || [],
+        selectedProposer: Chain.instance.selectedProposer!,
       },
     };
     socket.send(JSON.stringify(message));
