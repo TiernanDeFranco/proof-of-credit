@@ -1742,7 +1742,7 @@ class Chain {
     if (!proposal) {
       console.log(`No proposal found for block hash: ${blockHash}`);
       const filePath = path.join("D:/Chains", `${this.chain.length}.txt`);
-      const blockData = JSON.stringify(blockHash.toJSON(), null, 2);
+      const blockData = JSON.stringify(proposal, null, 2);
 
       try {
         fs.writeFileSync(filePath, blockData);
@@ -1777,7 +1777,7 @@ class Chain {
       const blockIndex = proposal.block.index;
       const filePath = path.join(
         "D:/Chains",
-        `${blockIndex}-votes:${totalVotes}.txt`
+        `${blockIndex}-votes-${totalVotes}.txt`
       );
       const blockData = JSON.stringify(proposal.block.toJSON(), null, 2);
 
