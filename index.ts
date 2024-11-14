@@ -556,8 +556,8 @@ class Chain {
   }
 
   isValidBlock(newBlock: Block, previousBlock: Block | null): boolean {
-    console.log(previousBlock);
-    console.log(newBlock);
+    // console.log(previousBlock);
+    // console.log(newBlock);
     if (previousBlock === null) {
       return this.validateGenesisBlock(newBlock);
     }
@@ -612,9 +612,9 @@ class Chain {
 
     const now = Date.now();
 
-    if (newBlock.timestamp > now) {
+    if (newBlock.timestamp > now + 5000) {
       console.log(
-        `Invalid block timestamp. Block timestamp (${newBlock.timestamp}) is in the future compared to current time (${now}).`
+        `Invalid block timestamp. Block timestamp (${newBlock.timestamp}) is more than 5 seconds in the future compared to current time (${now}).`
       );
       return false;
     }
@@ -628,14 +628,16 @@ class Chain {
     );
 
     const blockReward = blockRewards[0]; // Since we enforce only one, take the first
-    if (
-      blockReward.amount !== this.blockCreditReward ||
-      blockReward.receiver !== proposerAddress
-    ) {
-      console.log(
-        `Invalid block: "Block Reward" credit is incorrect. Amount: ${blockReward.amount}, Receiver: ${blockReward.receiver}, Expected Amount: ${this.blockCreditReward}, Expected Receiver: ${proposerAddress}.`
-      );
-      return false;
+    if (proposerAddress) {
+      if (
+        blockReward.amount !== this.blockCreditReward ||
+        blockReward.receiver !== proposerAddress
+      ) {
+        console.log(
+          `Invalid block: "Block Reward" credit is incorrect. Amount: ${blockReward.amount}, Receiver: ${blockReward.receiver}, Expected Amount: ${this.blockCreditReward}, Expected Receiver: ${proposerAddress}.`
+        );
+        return false;
+      }
     }
 
     if (blockRewards.length !== 1) {
@@ -1289,6 +1291,7 @@ class Chain {
   public voteTimestamp: number | null = null;
 
   async proposeBlock() {
+    console.log("Time of proposeblock start execution ", Date.now());
     this.selectedProposer = null;
     this.validatorBlock = null;
     this.voteTimestamp = null;
@@ -1359,6 +1362,7 @@ class Chain {
         );
 
         this.validatorBlock = newBlock;
+        console.log("Validator block set");
 
         // Broadcast the proposed block to the network
         if (this.selectedProposer.address === NODE_ADDRESS!) {
@@ -1369,6 +1373,8 @@ class Chain {
               type: MessageType.PROPOSED_BLOCK,
               data: newBlock.toJSON(),
             }; //add signing with private key, send public key and address, and then in handle proposed block verify the sign and then make sure the public key matches the address recieved
+
+            await this.delay(500);
 
             this.p2pServer.broadcast(proposedBlockMessage);
             console.log(
@@ -1548,15 +1554,15 @@ class Chain {
 
     console.log(`Received proposed block: ${proposedBlock.hash}`);
 
-    const lastBlock = Chain.instance.lastBlock;
+    const lastBlock = this.lastBlock;
     if (!this.isValidBlock(proposedBlock, lastBlock)) {
       console.log(`Proposed block ${proposedBlock.hash} is invalid. Ignoring.`);
       return; // Stop processing invalid blocks
     }
-
+    await this.delay(500);
     // If this node has a validatorBlock, vote for its own block
-    if (NODE_ADDRESS! && NODE_PRIVATE_KEY! && Chain.instance.validatorBlock) {
-      const ownBlock = Chain.instance.validatorBlock as Block;
+    if (NODE_ADDRESS! && NODE_PRIVATE_KEY! && this.validatorBlock) {
+      const ownBlock = this.validatorBlock as Block;
       console.log("Own Hash B ", ownBlock.hash);
       ownBlock.timestamp = proposedBlock.timestamp;
       console.log("Own Hash A ", ownBlock.hash);
@@ -1583,6 +1589,7 @@ class Chain {
             address: NODE_ADDRESS,
           },
         };
+
         this.p2pServer.broadcast(voteMessage);
         console.log(`Voted for block: ${voteHash}`);
       }
@@ -2079,10 +2086,7 @@ class P2PServer {
   public broadcast(message: IMessage, excludeSocket?: WebSocket) {
     this.sockets.forEach((socket) => {
       if (socket !== excludeSocket) {
-        const randomDelay = Math.random() * 1000; // Delay between 0 and 1000 ms
-        setTimeout(() => {
-          socket.send(JSON.stringify(message));
-        }, randomDelay);
+        socket.send(JSON.stringify(message));
       }
     });
   }

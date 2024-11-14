@@ -395,9 +395,9 @@ class Chain {
         while (chain.length > 1) {
             const latestBlock = chain[chain.length - 1];
             const secondLastBlock = chain[chain.length - 2];
-            const isLatestValid = this.isValidNewBlock(latestBlock, secondLastBlock);
+            const isLatestValid = this.isValidBlock(latestBlock, secondLastBlock);
             if (chain.length === 2 && isLatestValid) {
-                const isGensisValid = this.isValidNewBlock(secondLastBlock, null);
+                const isGensisValid = this.isValidBlock(secondLastBlock, null);
                 if (isGensisValid) {
                     console.log("Chain is valid with 2 blocks");
                     return true;
@@ -406,7 +406,7 @@ class Chain {
             }
             if (chain.length > 2) {
                 const thirdLastBlock = chain[chain.length - 3];
-                const isSecondLastValid = this.isValidNewBlock(secondLastBlock, thirdLastBlock);
+                const isSecondLastValid = this.isValidBlock(secondLastBlock, thirdLastBlock);
                 if (isLatestValid && isSecondLastValid) {
                     console.log("Found adjacent valid blocks.");
                     return true; // Chain is valid up to this point
@@ -443,29 +443,13 @@ class Chain {
             console.log("Received chain is invalid or shorter. Not replacing.");
         }
     }
-    isValidNewBlock(newBlock, previousBlock) {
-        console.log(previousBlock);
-        console.log(newBlock);
+    isValidBlock(newBlock, previousBlock) {
+        var _a;
+        // console.log(previousBlock);
+        // console.log(newBlock);
         if (previousBlock === null) {
             return this.validateGenesisBlock(newBlock);
         }
-        if (previousBlock.hash !== newBlock.prevHash) {
-            console.log("Invalid previous hash.");
-            return false;
-        }
-        if (previousBlock.index !== "Genesis") {
-            if (newBlock.timestamp <=
-                previousBlock.timestamp + this.blockTime + this.voteTimeout) {
-                console.log(`Invalid block timestamp. Blocks must have at least ${this.blockTime + this.voteTimeout} ms between them.`);
-                return false;
-            }
-        }
-        const now = Date.now();
-        if (newBlock.timestamp > now) {
-            console.log(`Invalid block timestamp. Block timestamp (${newBlock.timestamp}) is in the future compared to current time (${now}).`);
-            return false;
-        }
-        // Recalculate the hash and compare
         const recalculatedHash = crypto
             .createHash("SHA256")
             .update(JSON.stringify({
@@ -485,10 +469,40 @@ class Chain {
             console.log("Invalid block hash.");
             return false;
         }
-        const invalidCredit = newBlock.creditLedger.find((credit) => credit.reason === "Block Reward" &&
-            credit.amount > this.blockCreditReward);
-        if (invalidCredit) {
-            console.log(`Invalid credit in creditLedger. Block Reward (${invalidCredit.amount}) exceeds the allowed block reward (${this.blockCreditReward}).`);
+        // Validate the previous hash
+        if (previousBlock.hash !== newBlock.prevHash) {
+            console.log("Invalid previous hash.");
+            return false;
+        }
+        if (previousBlock.hash !== newBlock.prevHash) {
+            console.log("Invalid previous hash.");
+            return false;
+        }
+        if (previousBlock.index !== "Genesis") {
+            if (newBlock.timestamp <=
+                previousBlock.timestamp + this.blockTime + this.voteTimeout) {
+                console.log(`Invalid block timestamp. Blocks must have at least ${this.blockTime + this.voteTimeout} ms between them.`);
+                return false;
+            }
+        }
+        const now = Date.now();
+        if (newBlock.timestamp > now + 5000) {
+            console.log(`Invalid block timestamp. Block timestamp (${newBlock.timestamp}) is more than 5 seconds in the future compared to current time (${now}).`);
+            return false;
+        }
+        // Recalculate the hash and compare
+        const proposerAddress = (_a = this.selectedProposer) === null || _a === void 0 ? void 0 : _a.address; // Retrieve the proposer address
+        const blockRewards = newBlock.creditLedger.filter((credit) => credit.reason === "Block Reward");
+        const blockReward = blockRewards[0]; // Since we enforce only one, take the first
+        if (proposerAddress) {
+            if (blockReward.amount !== this.blockCreditReward ||
+                blockReward.receiver !== proposerAddress) {
+                console.log(`Invalid block: "Block Reward" credit is incorrect. Amount: ${blockReward.amount}, Receiver: ${blockReward.receiver}, Expected Amount: ${this.blockCreditReward}, Expected Receiver: ${proposerAddress}.`);
+                return false;
+            }
+        }
+        if (blockRewards.length !== 1) {
+            console.log(`Invalid block: Expected exactly 1 "Block Reward" credit, but found ${blockRewards.length}.`);
             return false;
         }
         const invalidNetworkParticipation = newBlock.creditLedger.find((credit) => credit.reason === "Network Participation" && credit.amount > 10);
@@ -497,7 +511,7 @@ class Chain {
             return false;
         }
         for (const transaction of newBlock.transactions) {
-            const { payer, payee, amount } = transaction;
+            const { payer, payee, amount, fee } = transaction;
             // Check if the payer is the blockchain mint address
             if (payer === this.blockchainMintAddress) {
                 const currentReward = this.getCurrentMintingReward();
@@ -527,6 +541,12 @@ class Chain {
             else {
                 if (transaction.fee == 0)
                     return false;
+                const expectedFeePercentage = this.determineFee(payer);
+                const expectedFee = amount * expectedFeePercentage;
+                if (fee !== expectedFee) {
+                    console.log(`Invalid transaction fee for transaction from ${payer} to ${payee}. Expected: ${expectedFee}, Actual: ${fee}.`);
+                    return false;
+                }
             }
         }
         return true;
@@ -561,7 +581,7 @@ class Chain {
             console.log("Block already processed. Ignoring.");
             return false;
         }
-        if (this.isValidNewBlock(newBlock, this.lastBlock)) {
+        if (this.isValidBlock(newBlock, this.lastBlock)) {
             this.chain.push(newBlock);
             this.processedBlockHashes.add(newBlock.hash);
             console.log("Block added to the chain:", newBlock);
@@ -763,24 +783,7 @@ class Chain {
             return;
         }
         // Calculate the transaction fee based on the payer’s credit score
-        const creditScore = this.getLatestCreditScoreFromChain(transfer.payer);
-        let feePercentage = 0.005; // Default 0.5%
-        if (creditScore >= 5000)
-            feePercentage = 0.002; // 0.2%
-        else if (creditScore >= 1000)
-            feePercentage = 0.005; // 0.5%
-        else if (creditScore >= 750)
-            feePercentage = 0.01; // 1%
-        else if (creditScore >= 500)
-            feePercentage = 0.015; // 1.5%
-        else if (creditScore >= 300)
-            feePercentage = 0.02; // 2%
-        else if (creditScore >= 200)
-            feePercentage = 0.03; // 3%
-        else if (creditScore >= 100)
-            feePercentage = 0.05; // 5%
-        else if (creditScore >= 50)
-            feePercentage = 0.1; // 10%
+        const feePercentage = this.determineFee(transfer.payer);
         // Calculate the fee Y
         const fee = transfer.amount * feePercentage;
         // Assign the fee to the transaction
@@ -793,6 +796,29 @@ class Chain {
         block.transactions.push(transfer);
         // Update pending balances for the transfer
         this.updatePendingBalance(transfer.payer, transfer.payee, payeeAmount);
+    }
+    determineFee(payerAddress) {
+        const creditScore = this.getLatestCreditScoreFromChain(payerAddress);
+        let feePercentage = 0.015; // Default 1.5%
+        if (creditScore >= 5000)
+            feePercentage = 0.002; // 0.2%
+        else if (creditScore >= 1000)
+            feePercentage = 0.005; // 0.5%
+        else if (creditScore >= 750)
+            feePercentage = 0.01; // 1%
+        else if (creditScore >= 500)
+            feePercentage = 0.015; // 1.5%
+        else if (creditScore >= 300)
+            feePercentage = 0.05; // 5%
+        else if (creditScore >= 200)
+            feePercentage = 0.15; // 15%
+        else if (creditScore >= 100)
+            feePercentage = 0.25; // 25%
+        else if (creditScore >= 50)
+            feePercentage = 0.5; // 50%
+        else if (creditScore === 0)
+            feePercentage = 0.99; // 99%
+        return feePercentage;
     }
     addFeeBreakdownToBlock(transfer, block) {
         var _a, _b;
@@ -948,7 +974,8 @@ class Chain {
             (this.chain.length > 1 ? this.voteTimeout : 0);
         this.voteTimestamp = nextProposalTime + this.voteTimeout;
         if (NODE_ADDRESS) {
-            if (this.eligibleValidators.some((node) => node.address === NODE_ADDRESS)) {
+            const isNodeEligible = this.eligibleValidators.some((node) => node.address === NODE_ADDRESS);
+            if (isNodeEligible) {
                 const delay = nextProposalTime - Date.now();
                 console.log(`Creating block at ${nextProposalTime}. Waiting ${delay}ms...`);
                 await this.delay(delay > 0 ? delay : 0);
@@ -975,6 +1002,7 @@ class Chain {
                             type: MessageType.PROPOSED_BLOCK,
                             data: newBlock.toJSON(),
                         }; //add signing with private key, send public key and address, and then in handle proposed block verify the sign and then make sure the public key matches the address recieved
+                        await this.delay(500);
                         this.p2pServer.broadcast(proposedBlockMessage);
                         console.log("Proposed block broadcasted for voting:", newBlock.hash);
                         this.proposedBlocks.set(newBlock.hash, {
@@ -1103,6 +1131,11 @@ class Chain {
     async handleProposedBlock(proposedBlockData) {
         const proposedBlock = Block.fromJSON(proposedBlockData);
         console.log(`Received proposed block: ${proposedBlock.hash}`);
+        const lastBlock = Chain.instance.lastBlock;
+        if (!this.isValidBlock(proposedBlock, lastBlock)) {
+            console.log(`Proposed block ${proposedBlock.hash} is invalid. Ignoring.`);
+            return; // Stop processing invalid blocks
+        }
         // If this node has a validatorBlock, vote for its own block
         if (NODE_ADDRESS && NODE_PRIVATE_KEY && Chain.instance.validatorBlock) {
             const ownBlock = Chain.instance.validatorBlock;
@@ -1128,6 +1161,7 @@ class Chain {
                         address: NODE_ADDRESS,
                     },
                 };
+                await this.delay(500);
                 this.p2pServer.broadcast(voteMessage);
                 console.log(`Voted for block: ${voteHash}`);
             }
@@ -1512,10 +1546,7 @@ class P2PServer {
     broadcast(message, excludeSocket) {
         this.sockets.forEach((socket) => {
             if (socket !== excludeSocket) {
-                const randomDelay = Math.random() * 1000; // Delay between 0 and 1000 ms
-                setTimeout(() => {
-                    socket.send(JSON.stringify(message));
-                }, randomDelay);
+                socket.send(JSON.stringify(message));
             }
         });
     }
