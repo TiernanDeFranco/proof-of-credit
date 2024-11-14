@@ -1256,6 +1256,7 @@ class Chain {
     }
     // Method to handle incoming votes
     handleVote(voteData) {
+        var _a;
         const { blockHash, signature, publicKey, address } = voteData;
         if (!blockHash || !signature || !publicKey || !address) {
             console.log("Malformed vote data. Ignoring vote.");
@@ -1282,16 +1283,8 @@ class Chain {
         // Iterate through all proposed blocks to find a match
         const proposal = this.proposedBlocks.get(blockHash);
         if (!proposal) {
-            console.log(`No proposal found for block hash: ${blockHash}`);
-            const filePath = path_1.default.join("D:/Chains", `${this.chain.length}.txt`);
-            const blockData = JSON.stringify(proposal, null, 2);
-            try {
-                fs_1.default.writeFileSync(filePath, blockData);
-                console.log(`Block data written to file: ${filePath}`);
-            }
-            catch (error) {
-                console.error(`Failed to write block data to file: ${error}`);
-            }
+            console.log(`No proposal found for hash: ${blockHash}. Requesting full chain sync.`);
+            (_a = this.p2pServer) === null || _a === void 0 ? void 0 : _a.requestChainFromPeers();
             return;
         }
         if (proposal.voters.includes(address)) {

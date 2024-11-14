@@ -1741,16 +1741,10 @@ class Chain {
     const proposal = this.proposedBlocks.get(blockHash);
 
     if (!proposal) {
-      console.log(`No proposal found for block hash: ${blockHash}`);
-      const filePath = path.join("D:/Chains", `${this.chain.length}.txt`);
-      const blockData = JSON.stringify(proposal, null, 2);
-
-      try {
-        fs.writeFileSync(filePath, blockData);
-        console.log(`Block data written to file: ${filePath}`);
-      } catch (error) {
-        console.error(`Failed to write block data to file: ${error}`);
-      }
+      console.log(
+        `No proposal found for hash: ${blockHash}. Requesting full chain sync.`
+      );
+      this.p2pServer?.requestChainFromPeers();
       return;
     }
 
