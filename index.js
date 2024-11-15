@@ -48,6 +48,8 @@ var MessageType;
     MessageType["NEW_NODE_LIST"] = "NEW_NODE_LIST";
     MessageType["PROPOSED_BLOCK"] = "PROPOSED_BLOCK";
     MessageType["VOTE"] = "VOTE";
+    MessageType["LAST_BLOCK_REQUEST"] = "LAST_BLOCK_REQUEST";
+    MessageType["LAST_BLOCK_RESPONSE"] = "LAST_BLOCK_RESPONSE";
 })(MessageType || (MessageType = {}));
 // --- Transaction Class ---
 class Transaction {
@@ -1160,6 +1162,9 @@ class Chain {
         this.isProposing = false;
         const { block, publicKey, signature, address } = proposedBlockData;
         const proposedBlock = Block.fromJSON(block);
+        if (!this.selectedProposer) {
+            this.selectedProposer = this.selectDeterministicBlockProposer(this.lastBlock.hash);
+        }
         this.proposedBlock = proposedBlock;
         console.log(`Received proposed block: ${proposedBlock.hash}`);
         const verify = crypto.createVerify("SHA256");
@@ -1258,11 +1263,23 @@ class Chain {
         }
     }
     // Method to handle incoming votes
-    handleVote(voteData) {
+    async handleVote(voteData) {
         var _a;
         if (!this.proposedBlock) {
-            console.log(`Lacking the proposed block. Requesting full chain sync.`);
-            (_a = this.p2pServer) === null || _a === void 0 ? void 0 : _a.requestChainFromPeers();
+            console.log(`Lacking the proposed block. Requesting proposed block at ${this.evalVoteTimestamp} + 1 seconds`);
+            let evalVoteDelay = this.evalVoteOffset;
+            if (this.evalVoteTimestamp) {
+                evalVoteDelay = this.evalVoteTimestamp - Date.now();
+            }
+            await this.delay(evalVoteDelay + 1000);
+            this.selectedProposer = null;
+            this.isProposing = false;
+            const message = {
+                id: (0, uuid_1.v4)(),
+                type: MessageType.LAST_BLOCK_REQUEST,
+                data: {},
+            };
+            (_a = this.p2pServer) === null || _a === void 0 ? void 0 : _a.broadcast(message);
             return;
         }
         const { blockHash, signature, publicKey, address } = voteData;
@@ -1302,81 +1319,98 @@ class Chain {
     }
     // Method to evaluate votes for a proposed block
     async evaluateVotes(proposedHash) {
-        var _a, _b, _c, _d;
+        var _a, _b, _c, _d, _e;
         console.log("EVALUATING VOTES at", Date.now());
-        const proposal = this.proposedBlocks.get(proposedHash);
-        if (!proposal) {
-            console.log(`No proposal found for hash: ${proposedHash}`);
+        if (!this.proposedBlock) {
+            console.log(`Lacking the proposed block. Requesting proposed block at ${this.evalVoteTimestamp} + 1 second`);
+            let evalVoteDelay = this.evalVoteOffset;
+            if (this.evalVoteTimestamp) {
+                evalVoteDelay = this.evalVoteTimestamp - Date.now();
+            }
+            await this.delay(evalVoteDelay + 1000);
+            this.selectedProposer = null;
+            this.isProposing = false;
+            const message = {
+                id: (0, uuid_1.v4)(),
+                type: MessageType.LAST_BLOCK_REQUEST,
+                data: {},
+            };
+            (_a = this.p2pServer) === null || _a === void 0 ? void 0 : _a.broadcast(message);
             return;
         }
-        const totalVotes = proposal.votes.length + 1;
-        if (totalVotes == 1 || totalVotes == 2) {
-            const blockIndex = proposal.block.index;
-            const filePath = path_1.default.join("D:/Chains", `${blockIndex}-votes-${totalVotes}.txt`);
-            const blockData = JSON.stringify(proposal.block.toJSON(), null, 2);
-            try {
-                fs_1.default.writeFileSync(filePath, blockData);
-                console.log(`Block data written to file: ${filePath}`);
+        const proposal = this.proposedBlocks.get(proposedHash);
+        if (proposal) {
+            const totalVotes = proposal.votes.length + 1;
+            if (totalVotes == 1 || totalVotes == 2) {
+                const blockIndex = proposal.block.index;
+                const filePath = path_1.default.join("D:/Chains", `${blockIndex}-votes-${totalVotes}.txt`);
+                const blockData = JSON.stringify(proposal.block.toJSON(), null, 2);
+                try {
+                    fs_1.default.writeFileSync(filePath, blockData);
+                    console.log(`Block data written to file: ${filePath}`);
+                }
+                catch (error) {
+                    console.error(`Failed to write block data to file: ${error}`);
+                }
             }
-            catch (error) {
-                console.error(`Failed to write block data to file: ${error}`);
+            const matchingVotes = proposal.votes.filter((voteHash) => voteHash === proposedHash).length +
+                1;
+            const percentage = (matchingVotes / totalVotes) * 100;
+            console.log(`Votes for block ${proposedHash}: ${matchingVotes}/${totalVotes} (${percentage.toFixed(2)}%)`);
+            if (percentage >= 75) {
+                // Add the block to the chain
+                const blockAdded = this.addBlock(proposal.block);
+                if (blockAdded) {
+                    console.log("Proposed block accepted and added to the chain:", proposedHash);
+                }
             }
-        }
-        const matchingVotes = proposal.votes.filter((voteHash) => voteHash === proposedHash).length + 1;
-        const percentage = (matchingVotes / totalVotes) * 100;
-        console.log(`Votes for block ${proposedHash}: ${matchingVotes}/${totalVotes} (${percentage.toFixed(2)}%)`);
-        if (percentage >= 75) {
-            // Add the block to the chain
-            const blockAdded = this.addBlock(proposal.block);
-            if (blockAdded) {
-                console.log("Proposed block accepted and added to the chain:", proposedHash);
+            else if (percentage < 75 && percentage >= 33) {
+                // Create an empty block
+                const emptyBlock = new Block(this.chain.length, this.lastBlock.hash, [], [], [], [], [], [], [], proposal.block.timestamp);
+                // Add the empty block to the chain
+                const blockAdded = this.addBlock(emptyBlock);
+                if (blockAdded) {
+                    console.log(`Proposed block ${proposedHash} received insufficient votes. An empty block was created.`);
+                }
             }
-        }
-        else if (percentage < 75 && percentage >= 33) {
-            // Create an empty block
-            const emptyBlock = new Block(this.chain.length, this.lastBlock.hash, [], [], [], [], [], [], [], proposal.block.timestamp);
-            // Add the empty block to the chain
-            const blockAdded = this.addBlock(emptyBlock);
-            if (blockAdded) {
-                console.log(`Proposed block ${proposedHash} received insufficient votes. An empty block was created.`);
+            else if (percentage < 33 && percentage >= 15) {
+                const halvedCredit = this.getLatestCreditScoreFromChain((_b = this.selectedProposer) === null || _b === void 0 ? void 0 : _b.address) /
+                    2;
+                // Create an empty block
+                const creditHalfBlock = new Block(this.chain.length, this.lastBlock.hash, [], [], [], [
+                    new Credit(-halvedCredit, (_c = this.selectedProposer) === null || _c === void 0 ? void 0 : _c.address, "Proposed Malicious Block - Halved"),
+                ], [], [], [], proposal.block.timestamp);
+                creditHalfBlock.creditScores = this.consolidateCreditScores(creditHalfBlock.creditLedger);
+                // Add the empty block to the chain
+                const blockAdded = this.addBlock(creditHalfBlock);
+                if (blockAdded) {
+                    console.log(`Proposed block ${proposedHash} was in superminority, proposer's score was halved`);
+                }
             }
-        }
-        else if (percentage < 33 && percentage >= 15) {
-            const halvedCredit = this.getLatestCreditScoreFromChain((_a = this.selectedProposer) === null || _a === void 0 ? void 0 : _a.address) / 2;
-            // Create an empty block
-            const creditHalfBlock = new Block(this.chain.length, this.lastBlock.hash, [], [], [], [
-                new Credit(-halvedCredit, (_b = this.selectedProposer) === null || _b === void 0 ? void 0 : _b.address, "Proposed Malicious Block - Halved"),
-            ], [], [], [], proposal.block.timestamp);
-            creditHalfBlock.creditScores = this.consolidateCreditScores(creditHalfBlock.creditLedger);
-            // Add the empty block to the chain
-            const blockAdded = this.addBlock(creditHalfBlock);
-            if (blockAdded) {
-                console.log(`Proposed block ${proposedHash} was in superminority, proposer's score was halved`);
+            else if (percentage < 15) {
+                const credit = this.getLatestCreditScoreFromChain((_d = this.selectedProposer) === null || _d === void 0 ? void 0 : _d.address);
+                // Create an empty block
+                const noCreditBlock = new Block(this.chain.length, this.lastBlock.hash, [], [], [], [
+                    new Credit(-credit, (_e = this.selectedProposer) === null || _e === void 0 ? void 0 : _e.address, "Proposed Malicious Block - Zeroed Out"),
+                ], [], [], [], proposal.block.timestamp);
+                noCreditBlock.creditScores = this.consolidateCreditScores(noCreditBlock.creditLedger);
+                // Add the empty block to the chain
+                const blockAdded = this.addBlock(noCreditBlock);
+                if (blockAdded) {
+                    console.log(`Proposed block ${proposedHash} was in SUPER SUPER minority, proposer's score was set to 0`);
+                }
             }
-        }
-        else if (percentage < 15) {
-            const credit = this.getLatestCreditScoreFromChain((_c = this.selectedProposer) === null || _c === void 0 ? void 0 : _c.address);
-            // Create an empty block
-            const noCreditBlock = new Block(this.chain.length, this.lastBlock.hash, [], [], [], [
-                new Credit(-credit, (_d = this.selectedProposer) === null || _d === void 0 ? void 0 : _d.address, "Proposed Malicious Block - Zeroed Out"),
-            ], [], [], [], proposal.block.timestamp);
-            noCreditBlock.creditScores = this.consolidateCreditScores(noCreditBlock.creditLedger);
-            // Add the empty block to the chain
-            const blockAdded = this.addBlock(noCreditBlock);
-            if (blockAdded) {
-                console.log(`Proposed block ${proposedHash} was in SUPER SUPER minority, proposer's score was set to 0`);
+            else {
+                console.log(`Unhandled case for block ${proposedHash} with vote percentage ${percentage}.`);
             }
+            // Remove the proposal from the map
+            this.proposedBlocks.delete(proposedHash);
+            this.selectedProposer = null;
+            this.validatorBlock = null;
+            this.voteTimestamp = null;
+            this.evalVoteTimestamp = null;
+            this.proposeBlock();
         }
-        else {
-            console.log(`Unhandled case for block ${proposedHash} with vote percentage ${percentage}.`);
-        }
-        // Remove the proposal from the map
-        this.proposedBlocks.delete(proposedHash);
-        this.selectedProposer = null;
-        this.validatorBlock = null;
-        this.voteTimestamp = null;
-        this.evalVoteTimestamp = null;
-        this.proposeBlock();
     }
 }
 Chain.instance = new Chain();
@@ -1476,6 +1510,8 @@ class P2PServer {
     constructor(port, peers = []) {
         this.sockets = [];
         this.processedMessageIds = new Set();
+        this.blockResponseCounts = {};
+        this.blockResponseTimeout = null;
         this.port = port;
         this.peers = peers;
         this.wss = new ws_1.Server({ port: this.port });
@@ -1585,17 +1621,91 @@ class P2PServer {
             case MessageType.VOTE:
                 Chain.instance.handleVote(message.data);
                 break;
+            case MessageType.LAST_BLOCK_REQUEST:
+                this.handleBlockRequest(socket);
+                break;
+            case MessageType.LAST_BLOCK_RESPONSE:
+                this.handleBlockResponse(message.data);
+                break;
             default:
                 console.log("Unknown message type:", message.type);
         }
         // Forward the message to other peers except the sender
         this.broadcast(message, socket);
     }
+    handleBlockRequest(socket) {
+        const message = {
+            id: (0, uuid_1.v4)(),
+            type: MessageType.LAST_BLOCK_RESPONSE,
+            data: Chain.instance.lastBlock.toJSON(),
+        };
+        console.log("sending latest block", Chain.instance.lastBlock.hash);
+        socket.send(JSON.stringify(message));
+    }
+    handleBlockResponse(data) {
+        const block = Block.fromJSON(data);
+        if (!block || !block.hash) {
+            console.log("Received invalid block data. Ignoring.");
+            return;
+        }
+        console.log("recieved block:", block.hash);
+        console.log("block pre vhash", block.prevHash);
+        if (this.blockResponseCounts[block.hash]) {
+            this.blockResponseCounts[block.hash].count += 1;
+        }
+        else {
+            this.blockResponseCounts[block.hash] = { block, count: 1 };
+        }
+        if (!this.blockResponseTimeout) {
+            this.blockResponseTimeout = setTimeout(() => {
+                this.processCollectedBlockResponses();
+            }, 2000); // Wait for 2 seconds to collect blocks
+        }
+    }
+    processCollectedBlockResponses() {
+        // Clear the timeout
+        if (this.blockResponseTimeout) {
+            clearTimeout(this.blockResponseTimeout);
+            this.blockResponseTimeout = null;
+        }
+        // Determine the block with the highest count
+        let candidateBlocks = [];
+        let maxCount = 0;
+        for (const [hash, { block, count }] of Object.entries(this.blockResponseCounts)) {
+            if (count > maxCount) {
+                maxCount = count;
+                candidateBlocks = [{ hash, block }];
+                maxCount = count;
+            }
+            else if (count === maxCount) {
+                candidateBlocks.push({ hash, block });
+            }
+        }
+        if (candidateBlocks.length === 0) {
+            console.log("No blocks received from peers. Cannot proceed.");
+            this.blockResponseCounts = {};
+            return;
+        }
+        candidateBlocks.sort((a, b) => a.hash.localeCompare(b.hash));
+        const selectedBlock = candidateBlocks[0].block;
+        // Validate the selected block
+        if (Chain.instance.isValidBlock(selectedBlock, Chain.instance.lastBlock)) {
+            Chain.instance.chain.push(selectedBlock);
+            Chain.instance.processedBlockHashes.add(selectedBlock.hash);
+            console.log(`Received and added missing block: ${selectedBlock}`);
+            // Proceed with proposing the next block or other necessary actions
+            Chain.instance.proposeBlock();
+        }
+        else {
+            console.log(`Invalid block received: ${selectedBlock.hash}. Ignoring.`);
+        }
+        // Clear the collected blocks
+        this.blockResponseCounts = {};
+    }
     handleNewTransaction(transactionData, senderSocket) {
         const transaction = Transaction.fromJSON(transactionData);
         Chain.instance.addPendingTransaction(transaction);
         console.log("New transaction added from network:", transaction);
-        // Broadcast handled by broadcast in handleMessage
     }
     handleNewContract(contractData, senderSocket) {
         const contract = SmartContract.fromJSON(contractData);
@@ -1638,7 +1748,7 @@ class P2PServer {
             console.log("Received chain is valid. Replacing the current chain.");
             // Broadcast the updated chain to other peers
             this.broadcastChain();
-            await Chain.instance.delay(5000);
+            await Chain.instance.delay(1000);
             if (!Chain.instance.isProposing) {
                 console.log("The selected proposer before proposing is:", Chain.instance.selectedProposer);
                 Chain.instance.proposeBlock();
