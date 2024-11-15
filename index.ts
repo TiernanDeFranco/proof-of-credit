@@ -3,13 +3,15 @@ import fs from "fs";
 import * as crypto from "crypto";
 import portfinder from "portfinder";
 import WebSocket, { Server as WebSocketServer } from "ws";
-import net from "net";
 import { v4 as uuidv4 } from "uuid";
 import path from "path";
 import os from "os";
+import { ec as EC } from "elliptic";
 
 let NODE_ADDRESS;
 let NODE_PRIVATE_KEY;
+
+const ec = new EC("secp256k1");
 
 const WalletIDPrepend: string = "pc_";
 
@@ -41,7 +43,8 @@ class Transaction {
     public payer: string, // Address of the sender
     public payee: string, // Address of the receiver
     public metadata: { [key: string]: any } | null = null, // Optional metadata for additional data like contract args
-    public fee: number = 0 // Fee added for each transaction
+    public fee: number = 0, // Fee added for each transaction
+    public timestamp = Date.now()
   ) {
     if (amount <= 0) {
       throw new Error("Transaction amount must be positive.");
@@ -59,6 +62,7 @@ class Transaction {
       payee: this.payee,
       metadata: this.metadata ? JSON.stringify(this.metadata) : null,
       fee: this.fee,
+      timestamp: this.timestamp,
     };
   }
 
@@ -68,7 +72,8 @@ class Transaction {
       data.payer,
       data.payee,
       data.metadata ? JSON.parse(data.metadata) : null,
-      data.fee
+      data.fee,
+      data.timestamp
     );
   }
 
@@ -156,6 +161,7 @@ class SmartContract {
   public code: string; // Raw TypeScript code for the contract
   public address: string | null = null; // Contract's address, to be determined later
   public publisherAddress: string | null = null; // Address of the creator
+  public timestamp = Date.now();
 
   constructor(code: string) {
     this.code = code;
@@ -1284,6 +1290,7 @@ class Chain {
   }
 
   blockTime = 20_000;
+  transactionOffset = 10_000;
   proposalOffset = 1_000;
   voteOffset = 5_000;
   evalVoteOffset = 10_000;
@@ -1311,6 +1318,38 @@ class Chain {
       `${this.selectedProposer.address} has been selected as the block proposer`
     );
 
+    let lastBlockTransactionSignatures = new Set(
+      lastBlock.transactions.map(
+        (tx) => `${tx.timestamp}-${tx.amount}-${tx.payer}-${tx.payee}`
+      )
+    );
+
+    let lastBlockContractSignatures = new Set(
+      lastBlock.contracts.map(
+        (contract) => `${contract.timestamp}-${contract.address}`
+      )
+    );
+
+    this.transactionPool = this.transactionPool.filter(
+      (transaction) =>
+        !lastBlockTransactionSignatures.has(
+          `${transaction.timestamp}-${transaction.amount}-${transaction.payer}-${transaction.payee}`
+        )
+    );
+
+    this.contractPool = this.contractPool.filter(
+      (contract) =>
+        !lastBlockContractSignatures.has(
+          `${contract.timestamp}-${contract.address}`
+        )
+    );
+
+    lastBlockTransactionSignatures = new Set();
+    lastBlockContractSignatures = new Set();
+
+    const transactionCutoffTimestamp =
+      lastBlock.timestamp + this.transactionOffset;
+
     const blockCreationTime = lastBlock.timestamp + this.blockTime;
 
     const proposalTime = blockCreationTime + this.proposalOffset;
@@ -1319,6 +1358,7 @@ class Chain {
     this.evalVoteTimestamp = this.voteTimestamp + this.evalVoteOffset;
 
     console.log("Important timestamps:");
+    console.log("Transaction Cutoff: ", transactionCutoffTimestamp);
     console.log("Block Creation: ", blockCreationTime);
     console.log("Block Proposal: ", proposalTime);
     console.log("Validator Voting: ", this.voteTimestamp);
@@ -1339,15 +1379,27 @@ class Chain {
         console.log(Date.now());
         console.log(new Date().toISOString());
 
+        const filteredTransactions = [...this.transactionPool]
+          .filter(
+            (transaction) => transaction.timestamp <= transactionCutoffTimestamp
+          )
+          .sort((a, b) => a.timestamp - b.timestamp);
+
+        const filteredContractPool = [...this.contractPool]
+          .filter(
+            (contract) => contract.timestamp <= transactionCutoffTimestamp
+          )
+          .sort((a, b) => a.timestamp - b.timestamp);
+
         const newBlock = new Block(
           this.chain.length,
           lastBlockHash,
-          [...this.transactionPool],
+          [...filteredTransactions],
           [],
           [],
           [],
           [],
-          [...this.contractPool],
+          [...filteredContractPool],
           [...this.statePool]
         );
 
@@ -1377,10 +1429,8 @@ class Chain {
           if (this.p2pServer) {
             const blockHash = newBlock.hash;
 
-            const sign = crypto.createSign("SHA256");
-            sign.update(blockHash);
-            sign.end();
-            const signature = sign.sign(NODE_PRIVATE_KEY!, "hex");
+            const keyPair = ec.keyFromPrivate(NODE_PRIVATE_KEY!, "hex");
+            const signature = keyPair.sign(blockHash);
 
             const proposedPublicKey = new Wallet(NODE_PRIVATE_KEY!).publicKey;
 
@@ -1419,16 +1469,9 @@ class Chain {
 
             // Append the block to the chain file
             //this.appendBlockToFile(newBlock);
-
-            const evalVoteDelay = this.evalVoteTimestamp! - Date.now();
-            console.log(
-              `Evalulating votes at ${this.evalVoteTimestamp}. Waiting ${evalVoteDelay}ms...`
-            );
-            await this.delay(evalVoteDelay);
-            this.evaluateVotes(newBlock.hash);
           }
 
-          this.executeSmartContractsInBlock(newBlock);
+          //this.executeSmartContractsInBlock(newBlock);
         }
       } else {
         console.log(
@@ -1436,6 +1479,20 @@ class Chain {
         );
       }
     }
+
+    let evalVoteDelay = this.evalVoteOffset;
+
+    if (this.evalVoteTimestamp) {
+      evalVoteDelay = this.evalVoteTimestamp - Date.now();
+    }
+    console.log(
+      `Evaluating votes at  ${this.evalVoteTimestamp}: Waiting ${
+        evalVoteDelay > 0 ? evalVoteDelay : 0
+      }ms to evaluate votes...`
+    );
+
+    await this.delay(evalVoteDelay);
+    this.evaluateVotes(this.proposedBlock?.hash!);
   }
 
   executeSmartContractsInBlock(block: Block) {
@@ -1594,21 +1651,14 @@ class Chain {
 
     console.log(`Received proposed block: ${proposedBlock.hash}`);
 
-    const verify = crypto.createVerify("SHA256");
-    verify.update(proposedBlock.hash);
-    verify.end();
-    const isValid = verify.verify(publicKey, signature, "hex");
+    const keyPair = ec.keyFromPublic(publicKey, "hex");
+    const isValid = keyPair.verify(proposedBlock.hash, signature);
 
-    const hashedPublicKey = crypto
-      .createHash("sha256")
-      .update(publicKey)
-      .digest("hex");
-    const generatedAddress =
-      WalletIDPrepend + hashedPublicKey.slice(0, 30 - WalletIDPrepend.length);
+    const generatedAddress = generateAddressFromPBK(publicKey);
 
     if (generatedAddress !== address) {
       console.log(
-        `Address included in block from ${address} and address regenerated from the public key for validation is invalid. Ignoring block.`
+        `Address included in block from ${address} and address regenerated from the public key for validation ${generatedAddress} is invalid. Ignoring block.`
       );
       return;
     }
@@ -1645,9 +1695,9 @@ class Chain {
       // Append the block to the chain file
       // this.appendBlockToFile(ownBlock);
 
-      const sign = crypto.createSign("SHA256");
-      sign.update(voteHash).end();
-      const voteSignature = sign.sign(NODE_PRIVATE_KEY!, "hex");
+      const keyPair = ec.keyFromPrivate(NODE_PRIVATE_KEY, "hex");
+
+      const signature = keyPair.sign(voteHash);
 
       const votePublicKey = new Wallet(NODE_PRIVATE_KEY).publicKey;
 
@@ -1658,7 +1708,7 @@ class Chain {
           type: MessageType.VOTE,
           data: {
             blockHash: voteHash,
-            signature: voteSignature,
+            signature: signature,
             publicKey: votePublicKey,
             address: NODE_ADDRESS,
           },
@@ -1672,19 +1722,6 @@ class Chain {
     } else {
       console.log("Validator block is not available, not voting");
     }
-    let evalVoteDelay = this.evalVoteOffset;
-
-    if (this.evalVoteTimestamp) {
-      evalVoteDelay = this.evalVoteTimestamp - Date.now();
-    }
-    console.log(
-      `Evaluating votes at  ${this.evalVoteTimestamp}: Waiting ${
-        evalVoteDelay > 0 ? evalVoteDelay : 0
-      }ms to evaluate votes...`
-    );
-
-    await this.delay(evalVoteDelay);
-    this.evaluateVotes(proposedBlock.hash);
   }
 
   storeProposedBlock(hash: string, block: Block, ownHash?: string) {
@@ -1749,17 +1786,10 @@ class Chain {
 
     console.log(`Received vote for block hash: ${blockHash} from ${address}`);
 
-    const verify = crypto.createVerify("SHA256");
-    verify.update(blockHash);
-    verify.end();
-    const isValid = verify.verify(publicKey, signature, "hex");
+    const keyPair = ec.keyFromPublic(publicKey, "hex");
+    const isValid = keyPair.verify(blockHash, signature);
 
-    const hashedPublicKey = crypto
-      .createHash("sha256")
-      .update(publicKey)
-      .digest("hex");
-    const generatedAddress =
-      WalletIDPrepend + hashedPublicKey.slice(0, 30 - WalletIDPrepend.length);
+    const generatedAddress = generateAddressFromPBK(publicKey);
 
     if (generatedAddress !== address) {
       console.log(
@@ -1963,6 +1993,18 @@ class Chain {
   }
 }
 
+function generateAddressFromPBK(publicKey: string): string {
+  const keyPair = ec.keyFromPublic(publicKey, "hex");
+
+  const hashedPublicKey = crypto
+    .createHash("sha256")
+    .update(keyPair.getPublic(true, "hex"), "hex")
+    .digest("hex");
+  return (
+    WalletIDPrepend + hashedPublicKey.slice(0, 30 - WalletIDPrepend.length)
+  );
+}
+
 // --- Wallet Class ---
 class Wallet {
   public publicKey: string;
@@ -1970,57 +2012,39 @@ class Wallet {
   public address: string;
 
   constructor(privateKeyInput?: string) {
-    let privateKeyPEM;
+    let privateKeyHex: string;
 
     if (privateKeyInput) {
-      // Check if the input looks like a PEM file (direct private key string)
-      if (privateKeyInput.includes("-----BEGIN PRIVATE KEY-----")) {
-        privateKeyPEM = privateKeyInput;
-        NODE_PRIVATE_KEY = privateKeyInput;
+      // Check if the input is a hex private key
+      if (/^[0-9a-fA-F]{64}$/.test(privateKeyInput)) {
+        privateKeyHex = privateKeyInput;
       } else {
-        // Assume it's a file path and try to read the PEM file
+        // Assume it's a file path and try to read the key
         try {
-          privateKeyPEM = fs.readFileSync(privateKeyInput, "utf8");
-          NODE_PRIVATE_KEY = privateKeyPEM;
+          privateKeyHex = fs.readFileSync(privateKeyInput, "utf8").trim();
         } catch (error) {
           throw new Error("Failed to read private key from file: " + error);
         }
       }
-
-      // Construct the private key from the PEM string
-      const keyObject = crypto.createPrivateKey({
-        key: privateKeyPEM,
-        format: "pem",
-        type: "pkcs8",
-      });
-
-      // Set the private key and generate the public key from it
-      this.privateKey = privateKeyPEM;
-      this.publicKey = crypto
-        .createPublicKey(keyObject)
-        .export({ type: "spki", format: "pem" })
-        .toString(); // Ensure it's a string
     } else {
-      // Generate a new key pair if no private key input is provided
-      const keyPair = crypto.generateKeyPairSync("rsa", {
-        modulusLength: 2048,
-        publicKeyEncoding: { type: "spki", format: "pem" },
-        privateKeyEncoding: { type: "pkcs8", format: "pem" },
-      });
-      this.publicKey = keyPair.publicKey;
-      this.privateKey = keyPair.privateKey;
+      // Generate a new secp256k1 key pair
+      const keyPair = ec.genKeyPair();
+      privateKeyHex = keyPair.getPrivate("hex");
     }
 
+    NODE_PRIVATE_KEY = privateKeyHex;
+
+    // Initialize the elliptic key pair using the private key
+    const keyPair = ec.keyFromPrivate(privateKeyHex, "hex");
+
+    this.privateKey = privateKeyHex; // Hex-encoded private key
+    this.publicKey = keyPair.getPublic(true, "hex"); // Compressed public key
+
     // Compute the wallet address based on the hashed public key
-    const hashedPublicKey = crypto
-      .createHash("sha256")
-      .update(this.publicKey)
-      .digest("hex");
-    this.address =
-      WalletIDPrepend + hashedPublicKey.slice(0, 30 - WalletIDPrepend.length);
+    this.address = generateAddressFromPBK(this.publicKey);
   }
 
-  sendMoney(amount: number, payeeAddress: string) {
+  public sendMoney(amount: number, payeeAddress: string) {
     const payerBalance = Chain.instance.getPendingBalance(this.address);
 
     if (payerBalance < amount) {
@@ -2235,12 +2259,28 @@ class P2PServer {
   }
 
   private handleBlockRequest(socket: WebSocket) {
+    if (!NODE_PRIVATE_KEY! || !NODE_ADDRESS!) return;
+
+    const latestBlock = Chain.instance.lastBlock;
+    const latestBlockHash = latestBlock.hash;
+
+    const sign = crypto.createSign("SHA256");
+    sign.update(latestBlockHash);
+    sign.end();
+    const signature = sign.sign(NODE_PRIVATE_KEY!, "hex");
+
+    const proposedPublicKey = new Wallet(NODE_PRIVATE_KEY!).publicKey;
     const message: IMessage = {
       id: uuidv4(),
       type: MessageType.LAST_BLOCK_RESPONSE,
-      data: Chain.instance.lastBlock.toJSON(),
+      data: {
+        block: latestBlock.toJSON(),
+        signature,
+        publicKey: proposedPublicKey,
+        address: NODE_ADDRESS,
+      },
     };
-    console.log("sending latest block", Chain.instance.lastBlock.hash);
+    console.log("sending latest block", latestBlockHash);
     socket.send(JSON.stringify(message));
   }
 
@@ -2251,19 +2291,46 @@ class P2PServer {
   private blockResponseTimeout: NodeJS.Timeout | null = null;
 
   private handleBlockResponse(data: any) {
-    const block = Block.fromJSON(data);
-    if (!block || !block.hash) {
+    const { block, signature, publicKey, address } = data;
+
+    const receivedBlock = Block.fromJSON(block);
+
+    const recievedBlockHash = receivedBlock.hash;
+
+    const verify = crypto.createVerify("SHA256");
+    verify.update(recievedBlockHash);
+    verify.end();
+    const isValid = verify.verify(publicKey, signature, "hex");
+
+    const generatedAddress = generateAddressFromPBK(publicKey);
+
+    if (generatedAddress !== address) {
+      console.log(
+        `Address included in block from ${address} and address regenerated from the public key for validation is invalid. Ignoring block.`
+      );
+      return;
+    }
+
+    if (!isValid) {
+      console.log(`Invalid signature from ${address}. Ignoring block.`);
+      return;
+    }
+
+    if (!receivedBlock || !recievedBlockHash) {
       console.log("Received invalid block data. Ignoring.");
       return;
     }
 
-    console.log("recieved block:", block.hash);
-    console.log("block pre vhash", block.prevHash);
+    console.log("recieved block:", recievedBlockHash);
+    console.log("block pre vhash", receivedBlock.prevHash);
 
-    if (this.blockResponseCounts[block.hash]) {
-      this.blockResponseCounts[block.hash].count += 1;
+    if (this.blockResponseCounts[recievedBlockHash]) {
+      this.blockResponseCounts[recievedBlockHash].count += 1;
     } else {
-      this.blockResponseCounts[block.hash] = { block, count: 1 };
+      this.blockResponseCounts[recievedBlockHash] = {
+        block: receivedBlock,
+        count: 1,
+      };
     }
 
     if (!this.blockResponseTimeout) {
@@ -2490,7 +2557,10 @@ function createWallet() {
 
   // Define the directory path in the user's Documents folder
   const dirPath = path.join(os.homedir(), "Documents", "ProofOfCredit");
-  const filePath = path.join(dirPath, "privateKey2.dat");
+  const filePath = path.join(
+    dirPath,
+    `privateKey-${Math.round(Math.random() * 10000)}.dat`
+  );
 
   // Ensure the directory exists
   fs.mkdirSync(dirPath, { recursive: true });
