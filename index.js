@@ -1,4 +1,6 @@
 "use strict";
+// Proof of Credit - Creduni
+// Created by Tiernan DeFranco - 2024
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     var desc = Object.getOwnPropertyDescriptor(m, k);
@@ -22,18 +24,14 @@ var __importStar = (this && this.__importStar) || function (mod) {
     __setModuleDefault(result, mod);
     return result;
 };
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
-// blockchain.ts
-const fs_1 = __importDefault(require("fs"));
+const fs = __importStar(require("fs"));
 const crypto = __importStar(require("crypto"));
-const portfinder_1 = __importDefault(require("portfinder"));
+const portfinder = __importStar(require("portfinder"));
 const ws_1 = __importStar(require("ws"));
 const uuid_1 = require("uuid");
-const path_1 = __importDefault(require("path"));
-const os_1 = __importDefault(require("os"));
+const path = __importStar(require("path"));
+const os = __importStar(require("os"));
 const elliptic_1 = require("elliptic");
 let NODE_ADDRESS;
 let NODE_PRIVATE_KEY;
@@ -73,8 +71,23 @@ class Transaction {
             throw new Error("Cannot send money to yourself.");
         }
     }
+    get hash() {
+        const hash = crypto
+            .createHash("SHA256")
+            .update(JSON.stringify({
+            amount: this.amount,
+            payer: this.payer,
+            payee: this.payee,
+            metadata: this.metadata,
+            fee: this.fee,
+            timestamp: this.timestamp,
+        }))
+            .digest("hex");
+        return hash;
+    }
     toJSON() {
         return {
+            hash: this.hash,
             amount: this.amount,
             payer: this.payer,
             payee: this.payee,
@@ -179,7 +192,12 @@ class SmartContract {
         }
         const hash = crypto
             .createHash("SHA256")
-            .update(this.code + this.publisherAddress + prevBlockHash)
+            .update(JSON.stringify({
+            code: this.code,
+            publisherAddress: this.publisherAddress,
+            prevBlockHash: prevBlockHash,
+            timestamp: this.timestamp,
+        }))
             .digest("hex");
         this.address = "sc_" + hash.slice(0, 30); // Adjust the slice length as needed
     }
@@ -206,9 +224,6 @@ class SmartContract {
                 hash,
                 selfAddress: this.address,
                 chain: {
-                    getCreditScore: (address) => {
-                        return Chain.instance.getLatestCreditScoreFromChain(address);
-                    },
                     getConfirmedBalance: (address) => {
                         return Chain.instance.getLatestBalanceFromChain(address);
                     },
@@ -273,8 +288,19 @@ class ContractState {
         this.address = address;
         this.state = { ...initialState };
     }
+    get hash() {
+        const hash = crypto
+            .createHash("SHA256")
+            .update(JSON.stringify({
+            address: this.address,
+            state: this.state,
+        }))
+            .digest("hex");
+        return hash;
+    }
     toJSON() {
         return {
+            hash: this.hash,
             address: this.address,
             state: JSON.stringify(this.state),
         };
@@ -302,7 +328,18 @@ class Block {
         this.timestamp = timestamp;
     }
     get hash() {
-        const str = JSON.stringify(this);
+        const str = JSON.stringify({
+            index: this.index,
+            prevHash: this.prevHash,
+            transactions: this.transactions,
+            fees: this.fees,
+            accountBalances: this.accountBalances,
+            creditLedger: this.creditLedger,
+            creditScores: this.creditScores,
+            contracts: this.contracts,
+            contractStates: this.contractStates,
+            timestamp: this.timestamp,
+        });
         const hash = crypto.createHash("SHA256");
         hash.update(str).end();
         return hash.digest("hex");
@@ -310,6 +347,7 @@ class Block {
     toJSON() {
         return {
             index: this.index,
+            hash: this.hash,
             prevHash: this.prevHash,
             transactions: this.transactions.map((tx) => tx.toJSON()),
             fees: this.fees.map((fee) => fee.toJSON()),
@@ -344,7 +382,7 @@ class Chain {
         this.blockchainMintAddress = "Blockchain Mint";
         this.blockCreditReward = 25;
         this.connectedNodes = [];
-        this.eligibleValidators = [];
+        this.eligibleProposers = [];
         this.initialMintingReward = 100;
         this.minimumReward = 1;
         this.isProposing = false;
@@ -520,50 +558,7 @@ class Chain {
                 return false;
             }
         }
-        const invalidNetworkParticipation = newBlock.creditLedger.find((credit) => credit.reason === "Network Participation" && credit.amount > 10);
-        if (invalidNetworkParticipation) {
-            console.log(`Invalid credit in creditLedger. Network Participation credits (${invalidNetworkParticipation.amount}) exceed the allowed limit of 10.`);
-            return false;
-        }
-        for (const transaction of newBlock.transactions) {
-            const { payer, payee, amount, fee } = transaction;
-            // Check if the payer is the blockchain mint address
-            if (payer === this.blockchainMintAddress) {
-                const currentReward = this.getCurrentMintingReward();
-                if (amount > currentReward) {
-                    console.log("Tried to mint", amount, " tokens while the current minting reward is ", currentReward);
-                    return false;
-                }
-                // Find credit deductions for the payee in the credit ledger
-                const payeeCredits = newBlock.creditLedger.filter((credit) => credit.receiver === payee);
-                const totalDeduction = payeeCredits.reduce((sum, credit) => sum + credit.amount, 0);
-                if (totalDeduction === 0) {
-                    console.log(`No corresponding credit deduction for payee ${payee} in creditLedger, but should've halved their tokens to mint.`);
-                    return false;
-                }
-                // Find the credit score for the payee
-                const payeeCreditScore = newBlock.creditScores.find((creditScore) => creditScore.address === payee);
-                if (!payeeCreditScore) {
-                    console.log(`No credit score found for payee ${payee}.`);
-                    return false;
-                }
-                // Ensure credit score aligns within the 100-credit window
-                if (Math.abs(totalDeduction - payeeCreditScore.score) > 100) {
-                    console.log(`Credit score (${payeeCreditScore.score}) is not within 100 credits of the credit deduction (${totalDeduction}) for ${payee}.`);
-                    return false;
-                }
-            }
-            else {
-                if (transaction.fee == 0)
-                    return false;
-                const expectedFeePercentage = this.determineFee(payer);
-                const expectedFee = amount * expectedFeePercentage;
-                if (fee !== expectedFee) {
-                    console.log(`Invalid transaction fee for transaction from ${payer} to ${payee}. Expected: ${expectedFee}, Actual: ${fee}.`);
-                    return false;
-                }
-            }
-        }
+        //make sure to also verify that the transaction hashes match, that the public key is verifed by sig, that the public key's generated address = the address
         return true;
     }
     validateGenesisBlock(newBlock) {
@@ -599,7 +594,7 @@ class Chain {
         if (this.isValidBlock(newBlock, this.lastBlock)) {
             this.chain.push(newBlock);
             this.processedBlockHashes.add(newBlock.hash);
-            console.log("Block added to the chain:", newBlock);
+            console.log("Block added to the chain:", newBlock.toJSON());
             return true;
         }
         return false;
@@ -608,14 +603,14 @@ class Chain {
         if (!NODE_ADDRESS) {
             throw new Error("NODE_ADDRESS is not defined.");
         }
-        const CHAINS_DIR = path_1.default.join("D:", "Chains");
-        if (!fs_1.default.existsSync(CHAINS_DIR)) {
-            fs_1.default.mkdirSync(CHAINS_DIR, { recursive: true });
+        const CHAINS_DIR = path.join("D:", "Chains");
+        if (!fs.existsSync(CHAINS_DIR)) {
+            fs.mkdirSync(CHAINS_DIR, { recursive: true });
             console.log(`Created Chains directory at ${CHAINS_DIR}`);
         }
         // Sanitize NODE_ADDRESS to prevent path traversal or invalid characters
         const sanitizedAddress = NODE_ADDRESS.replace(/[^a-zA-Z0-9_-]/g, "");
-        return path_1.default.join(CHAINS_DIR, `chain_${sanitizedAddress}.txt`);
+        return path.join(CHAINS_DIR, `chain_${sanitizedAddress}.txt`);
     }
     appendBlockToFile(block) {
         try {
@@ -623,7 +618,7 @@ class Chain {
             // Serialize the block with indentation (2 spaces)
             const serializedBlock = JSON.stringify(block.toJSON(), null, 2);
             // Append the serialized block followed by two newlines for readability
-            fs_1.default.appendFileSync(filePath, serializedBlock + "\n\n");
+            fs.appendFileSync(filePath, serializedBlock + "\n\n");
             console.log(`Block appended to file: ${filePath}`);
         }
         catch (error) {
@@ -693,16 +688,16 @@ class Chain {
     }
     getMiningThreshold() {
         let totalScore = 0;
-        let numValidators = 0;
-        this.eligibleValidators.forEach((validator) => {
-            const validatorCreditScore = this.getLatestCreditScoreFromChain(validator.address);
-            totalScore += validatorCreditScore;
-            numValidators++;
+        let numProposers = 0;
+        this.eligibleProposers.forEach((proposer) => {
+            const proposerCreditScore = this.getLatestCreditScoreFromChain(proposer.address);
+            totalScore += proposerCreditScore;
+            numProposers++;
         });
-        if (numValidators === 0)
+        if (numProposers === 0)
             return 0;
-        const averageScore = totalScore / numValidators;
-        const reductionFactor = 0.3;
+        const averageScore = totalScore / numProposers;
+        const reductionFactor = 0.25;
         const reducer = averageScore * reductionFactor;
         const reducedThreshold = averageScore - reducer;
         // Cap the threshold at 1000
@@ -711,18 +706,18 @@ class Chain {
     selectDeterministicBlockProposer(prevHash) {
         const threshold = this.getMiningThreshold();
         console.log("Credit Score Required:", threshold);
-        this.eligibleValidators = [...this.connectedNodes]
+        this.eligibleProposers = [...this.connectedNodes]
             .filter((miner) => this.getLatestCreditScoreFromChain(miner.address) >= threshold)
             .sort((a, b) => a.address.localeCompare(b.address));
-        if (this.eligibleValidators.length === 0) {
-            this.eligibleValidators = [...this.connectedNodes];
+        if (this.eligibleProposers.length === 0) {
+            this.eligibleProposers = [...this.connectedNodes];
         }
-        console.log(this.eligibleValidators);
+        console.log(this.eligibleProposers);
         const hashInput = prevHash || "defaultFallbackHash";
         const hash = crypto.createHash("SHA256").update(hashInput).digest("hex");
         const hashValue = BigInt("0x" + hash);
-        const selectedIndex = Number(hashValue % BigInt(this.eligibleValidators.length));
-        return this.eligibleValidators[selectedIndex];
+        const selectedIndex = Number(hashValue % BigInt(this.eligibleProposers.length));
+        return this.eligibleProposers[selectedIndex];
     }
     get lastBlock() {
         return this.chain[this.chain.length - 1];
@@ -797,7 +792,7 @@ class Chain {
             return;
         }
         // Calculate the transaction fee based on the payer’s credit score
-        const feePercentage = this.determineFee(transfer.payer);
+        const feePercentage = this.determineFee();
         // Calculate the fee Y
         const fee = transfer.amount * feePercentage;
         // Assign the fee to the transaction
@@ -811,28 +806,8 @@ class Chain {
         // Update pending balances for the transfer
         this.updatePendingBalance(transfer.payer, transfer.payee, payeeAmount);
     }
-    determineFee(payerAddress) {
-        const creditScore = this.getLatestCreditScoreFromChain(payerAddress);
-        let feePercentage = 0.015; // Default 1.5%
-        if (creditScore >= 5000)
-            feePercentage = 0.002; // 0.2%
-        else if (creditScore >= 1000)
-            feePercentage = 0.005; // 0.5%
-        else if (creditScore >= 750)
-            feePercentage = 0.01; // 1%
-        else if (creditScore >= 500)
-            feePercentage = 0.015; // 1.5%
-        else if (creditScore >= 300)
-            feePercentage = 0.05; // 5%
-        else if (creditScore >= 200)
-            feePercentage = 0.15; // 15%
-        else if (creditScore >= 100)
-            feePercentage = 0.25; // 25%
-        else if (creditScore >= 50)
-            feePercentage = 0.5; // 50%
-        else if (creditScore === 0)
-            feePercentage = 0.99; // 99%
-        return feePercentage;
+    determineFee() {
+        return 0.01;
     }
     addFeeBreakdownToBlock(transfer, block) {
         var _a, _b;
@@ -840,30 +815,16 @@ class Chain {
         const burnAmount = fee / 2;
         const remainingFee = fee - burnAmount;
         const proposerShare = remainingFee / 2;
-        // Get validator addresses excluding the proposer
-        const validatorAddresses = [...this.eligibleValidators]
-            .filter((miner) => { var _a; return miner.address !== ((_a = this.selectedProposer) === null || _a === void 0 ? void 0 : _a.address); }) // Exclude the proposer
-            .map((miner) => miner.address); // Extract addresses
-        const validatorShare = validatorAddresses.length > 0
-            ? remainingFee / 2 / validatorAddresses.length
-            : 0;
         // Fee breakdown
         block.fees.push(new Fee(burnAmount, "Transaction Fee Burn", "Burned Fee"));
         if ((_a = this.selectedProposer) === null || _a === void 0 ? void 0 : _a.address) {
             block.fees.push(new Fee(proposerShare, this.selectedProposer.address, "Proposer Fee"));
-        }
-        for (const validator of validatorAddresses) {
-            block.fees.push(new Fee(validatorShare, validator, "Validator Fee"));
         }
         // Update pending balances for proposer and validators
         if ((_b = this.selectedProposer) === null || _b === void 0 ? void 0 : _b.address) {
             this.pendingBalances[this.selectedProposer.address] =
                 (this.pendingBalances[this.selectedProposer.address] || 0) +
                     proposerShare;
-        }
-        for (const validator of validatorAddresses) {
-            this.pendingBalances[validator] =
-                (this.pendingBalances[validator] || 0) + validatorShare;
         }
     }
     addTransferToPool(transaction, publicKey, signature) {
@@ -951,20 +912,7 @@ class Chain {
         return Object.keys(balanceMap).map((address) => new AccountBalance(address, balanceMap[address]));
     }
     applyCreditRewards(transaction, block) {
-        if (transaction.payer !== this.blockchainMintAddress &&
-            !transaction.payee.startsWith("sc_") &&
-            !transaction.payer.startsWith("sc_")) {
-            const payerInLast1Block = this.wasPayerInLastBlocks(transaction.payer, 1);
-            const payerInLast2Blocks = this.wasPayerInLastBlocks(transaction.payer, 2);
-            if (payerInLast2Blocks) {
-                block.creditLedger.push(new Credit(-50, transaction.payer, "Penalty for frequent transactions"));
-            }
-            else if (!payerInLast1Block) {
-                block.creditLedger.push(new Credit(10, transaction.payer, "Network Participation"));
-                block.creditLedger.push(new Credit(10, transaction.payee, "Network Participation"));
-            }
-        }
-        else if (transaction.payer === this.blockchainMintAddress) {
+        if (transaction.payer === this.blockchainMintAddress) {
             const currentCreditScore = this.getLatestCreditScoreFromChain(transaction.payee);
             const halvedCreditScore = currentCreditScore / 2;
             block.creditLedger.push(new Credit(-halvedCreditScore, transaction.payee, "Credit Halved From Minting Tokens"));
@@ -985,10 +933,10 @@ class Chain {
             return;
         }
         console.log(`${this.selectedProposer.address} has been selected as the block proposer`);
-        let lastBlockTransactionSignatures = new Set(lastBlock.transactions.map((tx) => `${tx.timestamp}-${tx.amount}-${tx.payer}-${tx.payee}`));
-        let lastBlockContractSignatures = new Set(lastBlock.contracts.map((contract) => `${contract.timestamp}-${contract.address}`));
-        this.transactionPool = this.transactionPool.filter((transaction) => !lastBlockTransactionSignatures.has(`${transaction.timestamp}-${transaction.amount}-${transaction.payer}-${transaction.payee}`));
-        this.contractPool = this.contractPool.filter((contract) => !lastBlockContractSignatures.has(`${contract.timestamp}-${contract.address}`));
+        let lastBlockTransactionSignatures = new Set(lastBlock.transactions.map((tx) => tx.hash));
+        let lastBlockContractSignatures = new Set(lastBlock.contracts.map((contract) => contract.address));
+        this.transactionPool = this.transactionPool.filter((transaction) => !lastBlockTransactionSignatures.has(transaction.hash));
+        this.contractPool = this.contractPool.filter((contract) => !lastBlockContractSignatures.has(contract.address));
         lastBlockTransactionSignatures = new Set();
         lastBlockContractSignatures = new Set();
         const transactionCutoffTimestamp = lastBlock.timestamp + this.transactionOffset;
@@ -1003,7 +951,7 @@ class Chain {
         console.log("Validator Voting: ", this.voteTimestamp);
         console.log("Vote Evaluation: ", this.evalVoteTimestamp);
         if (NODE_ADDRESS) {
-            const isNodeEligible = this.eligibleValidators.some((node) => node.address === NODE_ADDRESS);
+            const isNodeEligible = this.eligibleProposers.some((node) => node.address === NODE_ADDRESS);
             if (isNodeEligible) {
                 const delay = blockCreationTime - Date.now();
                 console.log(`Creating block at ${blockCreationTime}. Waiting ${delay}ms...`);
@@ -1023,7 +971,7 @@ class Chain {
                     this.applyTransfer(transfer, newBlock);
                     this.applyCreditRewards(transfer, newBlock);
                 }
-                this.rewardValidator(this.selectedProposer.address, newBlock);
+                this.rewardProposer(this.selectedProposer.address, newBlock);
                 // Consolidate account balances and credit scores
                 newBlock.accountBalances = this.consolidateAccountBalances(newBlock.transactions, newBlock.fees);
                 newBlock.creditScores = this.consolidateCreditScores(newBlock.creditLedger);
@@ -1046,7 +994,7 @@ class Chain {
                                 publicKey: proposedPublicKey,
                                 address: NODE_ADDRESS,
                             },
-                        }; //add signing with private key, send public key and address, and then in handle proposed block verify the sign and then make sure the public key matches the address recieved
+                        }; //signing with private key, send public key and address, and then in handle proposed block verify the sign and then make sure the public key matches the address recieved
                         this.proposedBlock = newBlock;
                         const delay = proposalTime - Date.now();
                         console.log(`Proposing block at ${proposalTime}. Waiting ${delay}ms...`);
@@ -1156,19 +1104,9 @@ class Chain {
         return updatedScores.filter((creditScore) => creditScore.address !== this.blockchainMintAddress &&
             !creditScore.address.startsWith("sc_"));
     }
-    rewardValidator(validatorAddress, block) {
-        const validatorCredit = new Credit(this.blockCreditReward, validatorAddress, "Block Reward");
+    rewardProposer(address, block) {
+        const validatorCredit = new Credit(this.blockCreditReward, address, "Block Reward");
         block.creditLedger.push(validatorCredit);
-    }
-    wasPayerInLastBlocks(address, blocksToCheck) {
-        const chainLength = this.chain.length;
-        for (let i = chainLength - 1; i >= Math.max(0, chainLength - blocksToCheck); i--) {
-            const block = this.chain[i];
-            if (block.transactions.some((t) => t.payer === address)) {
-                return true;
-            }
-        }
-        return false;
     }
     getCurrentMintingReward() {
         const length = this.chain.length;
@@ -1321,7 +1259,7 @@ class Chain {
     }
     // Method to evaluate votes for a proposed block
     async evaluateVotes(proposedHash) {
-        var _a, _b, _c, _d, _e;
+        var _a, _b, _c, _d, _e, _f;
         console.log("EVALUATING VOTES at", Date.now());
         if (!this.proposedBlock) {
             console.log(`Lacking the proposed block. Requesting proposed block at ${this.evalVoteTimestamp} + 1 second`);
@@ -1342,23 +1280,27 @@ class Chain {
         }
         const proposal = this.proposedBlocks.get(proposedHash);
         if (proposal) {
-            const totalVotes = proposal.votes.length + 1;
-            if (totalVotes == 1 || totalVotes == 2) {
-                const blockIndex = proposal.block.index;
-                const filePath = path_1.default.join("D:/Chains", `${blockIndex}-votes-${totalVotes}.txt`);
-                const blockData = JSON.stringify(proposal.block.toJSON(), null, 2);
-                try {
-                    fs_1.default.writeFileSync(filePath, blockData);
-                    console.log(`Block data written to file: ${filePath}`);
+            let matchingVotesWeighted = 0;
+            let totalVotesWeighted = 0;
+            const proposerAddress = (_b = this.selectedProposer) === null || _b === void 0 ? void 0 : _b.address;
+            const proposerCredit = this.getLatestCreditScoreFromChain(proposerAddress);
+            const proposerVotes = calculateWeightedVotesFromCredit(proposerCredit);
+            matchingVotesWeighted += proposerVotes;
+            totalVotesWeighted += proposerVotes;
+            for (let i = 0; i < proposal.voters.length; i++) {
+                const voterAddress = proposal.voters[i];
+                const voteHash = proposal.votes[i];
+                const creditScore = this.getLatestCreditScoreFromChain(voterAddress);
+                const weightedVotes = calculateWeightedVotesFromCredit(creditScore);
+                if (voteHash === proposedHash) {
+                    matchingVotesWeighted += weightedVotes;
+                    console.log(`Voter ${voterAddress} contributed ${weightedVotes} weight to matching votes.`);
                 }
-                catch (error) {
-                    console.error(`Failed to write block data to file: ${error}`);
-                }
+                totalVotesWeighted += weightedVotes;
+                console.log(`Voter ${voterAddress} contributed ${weightedVotes} weight to total votes.`);
             }
-            const matchingVotes = proposal.votes.filter((voteHash) => voteHash === proposedHash).length +
-                1;
-            const percentage = (matchingVotes / totalVotes) * 100;
-            console.log(`Votes for block ${proposedHash}: ${matchingVotes}/${totalVotes} (${percentage.toFixed(2)}%)`);
+            const percentage = (matchingVotesWeighted / totalVotesWeighted) * 100;
+            console.log(`Votes for block ${proposedHash}: ${matchingVotesWeighted}/${totalVotesWeighted} (${percentage.toFixed(2)}%)`);
             if (percentage >= 75) {
                 // Add the block to the chain
                 const blockAdded = this.addBlock(proposal.block);
@@ -1376,11 +1318,11 @@ class Chain {
                 }
             }
             else if (percentage < 33 && percentage >= 15) {
-                const halvedCredit = this.getLatestCreditScoreFromChain((_b = this.selectedProposer) === null || _b === void 0 ? void 0 : _b.address) /
+                const halvedCredit = this.getLatestCreditScoreFromChain((_c = this.selectedProposer) === null || _c === void 0 ? void 0 : _c.address) /
                     2;
                 // Create an empty block
                 const creditHalfBlock = new Block(this.chain.length, this.lastBlock.hash, [], [], [], [
-                    new Credit(-halvedCredit, (_c = this.selectedProposer) === null || _c === void 0 ? void 0 : _c.address, "Proposed Malicious Block - Halved"),
+                    new Credit(-halvedCredit, (_d = this.selectedProposer) === null || _d === void 0 ? void 0 : _d.address, "Proposed Malicious Block - Halved"),
                 ], [], [], [], proposal.block.timestamp);
                 creditHalfBlock.creditScores = this.consolidateCreditScores(creditHalfBlock.creditLedger);
                 // Add the empty block to the chain
@@ -1390,10 +1332,10 @@ class Chain {
                 }
             }
             else if (percentage < 15) {
-                const credit = this.getLatestCreditScoreFromChain((_d = this.selectedProposer) === null || _d === void 0 ? void 0 : _d.address);
+                const credit = this.getLatestCreditScoreFromChain((_e = this.selectedProposer) === null || _e === void 0 ? void 0 : _e.address);
                 // Create an empty block
                 const noCreditBlock = new Block(this.chain.length, this.lastBlock.hash, [], [], [], [
-                    new Credit(-credit, (_e = this.selectedProposer) === null || _e === void 0 ? void 0 : _e.address, "Proposed Malicious Block - Zeroed Out"),
+                    new Credit(-credit, (_f = this.selectedProposer) === null || _f === void 0 ? void 0 : _f.address, "Proposed Malicious Block - Zeroed Out"),
                 ], [], [], [], proposal.block.timestamp);
                 noCreditBlock.creditScores = this.consolidateCreditScores(noCreditBlock.creditLedger);
                 // Add the empty block to the chain
@@ -1416,6 +1358,49 @@ class Chain {
     }
 }
 Chain.instance = new Chain();
+const creditVoteMappings = [
+    { credit: 0, votes: 0.1 },
+    { credit: 250, votes: 0.5 },
+    { credit: 500, votes: 1 },
+    { credit: 750, votes: 1.5 },
+    { credit: 1000, votes: 5 },
+    { credit: 2500, votes: 8 },
+    { credit: 5000, votes: 10 },
+    { credit: 10000, votes: 15 },
+    { credit: 25000, votes: 25 },
+    { credit: 50000, votes: 50 },
+    { credit: 100000, votes: 100 },
+];
+function calculateWeightedVotesFromCredit(creditScore) {
+    // Handle credit scores below the minimum mapping
+    if (creditScore <= creditVoteMappings[0].credit) {
+        return creditVoteMappings[0].votes;
+    }
+    // Handle credit scores above the maximum mapping
+    if (creditScore >= creditVoteMappings[creditVoteMappings.length - 1].credit) {
+        return creditVoteMappings[creditVoteMappings.length - 1].votes;
+    }
+    // Iterate through the mappings to find the correct interval
+    for (let i = 0; i < creditVoteMappings.length - 1; i++) {
+        const current = creditVoteMappings[i];
+        const next = creditVoteMappings[i + 1];
+        if (creditScore === current.credit) {
+            return current.votes;
+        }
+        if (creditScore > current.credit && creditScore < next.credit) {
+            // Calculate the slope (rate of change)
+            const slope = (next.votes - current.votes) / (next.credit - current.credit);
+            // Perform linear interpolation
+            const interpolatedVotes = current.votes + slope * (creditScore - current.credit);
+            // Cap the vote weight at 100 and round to the nearest tenth
+            const cappedVoteWeight = Math.min(interpolatedVotes, 100);
+            const roundedVoteWeight = Math.round(cappedVoteWeight * 10) / 10;
+            return roundedVoteWeight;
+        }
+    }
+    // Fallback in case the creditScore doesn't match any condition
+    return 1;
+}
 function generateAddressFromPBK(publicKey) {
     const keyPair = ec.keyFromPublic(publicKey, "hex");
     const hashedPublicKey = crypto
@@ -1436,7 +1421,7 @@ class Wallet {
             else {
                 // Assume it's a file path and try to read the key
                 try {
-                    privateKeyHex = fs_1.default.readFileSync(privateKeyInput, "utf8").trim();
+                    privateKeyHex = fs.readFileSync(privateKeyInput, "utf8").trim();
                 }
                 catch (error) {
                     throw new Error("Failed to read private key from file: " + error);
@@ -1505,7 +1490,7 @@ class P2PServer {
         this.blockResponseTimeout = null;
         this.port = port;
         this.peers = peers;
-        this.wss = new ws_1.Server({ port: this.port });
+        this.wss = new ws_1.WebSocketServer({ port: this.port });
         this.listen();
         this.connectToPeers(this.peers);
         console.log(`WebSocket P2P server listening on port: ${this.port}`);
@@ -1513,9 +1498,9 @@ class P2PServer {
         this.cleanupProcessedMessages();
     }
     static async create(basePort = 3170, peers = []) {
-        portfinder_1.default.basePort = basePort; // Set the base port
+        portfinder.setBasePort(basePort);
         try {
-            const availablePort = await portfinder_1.default.getPortPromise();
+            const availablePort = await portfinder.getPortPromise();
             const server = new P2PServer(availablePort, peers);
             return server;
         }
@@ -1629,10 +1614,8 @@ class P2PServer {
             return;
         const latestBlock = Chain.instance.lastBlock;
         const latestBlockHash = latestBlock.hash;
-        const sign = crypto.createSign("SHA256");
-        sign.update(latestBlockHash);
-        sign.end();
-        const signature = sign.sign(NODE_PRIVATE_KEY, "hex");
+        const keyPair = ec.keyFromPrivate(NODE_PRIVATE_KEY, "hex");
+        const signature = keyPair.sign(latestBlockHash);
         const proposedPublicKey = new Wallet(NODE_PRIVATE_KEY).publicKey;
         const message = {
             id: (0, uuid_1.v4)(),
@@ -1651,10 +1634,8 @@ class P2PServer {
         const { block, signature, publicKey, address } = data;
         const receivedBlock = Block.fromJSON(block);
         const recievedBlockHash = receivedBlock.hash;
-        const verify = crypto.createVerify("SHA256");
-        verify.update(recievedBlockHash);
-        verify.end();
-        const isValid = verify.verify(publicKey, signature, "hex");
+        const keyPair = ec.keyFromPublic(publicKey, "hex");
+        const isValid = keyPair.verify(recievedBlockHash, signature);
         const generatedAddress = generateAddressFromPBK(publicKey);
         if (generatedAddress !== address) {
             console.log(`Address included in block from ${address} and address regenerated from the public key for validation is invalid. Ignoring block.`);
@@ -1746,7 +1727,7 @@ class P2PServer {
     }
     handleNewNodeList(message) {
         const nodeList = message.data.nodes || [];
-        Chain.instance.eligibleValidators = message.data.validators || [];
+        Chain.instance.eligibleProposers = message.data.proposers || [];
         nodeList.forEach((address) => {
             const existingNode = Chain.instance.connectedNodes.find((node) => node.address === address);
             if (!existingNode) {
@@ -1824,7 +1805,7 @@ class P2PServer {
             type: MessageType.NEW_NODE_LIST,
             data: {
                 nodes: connectedNodes || [],
-                validators: Chain.instance.eligibleValidators || [],
+                proposers: Chain.instance.eligibleProposers || [],
                 selectedProposer: Chain.instance.selectedProposer,
             },
         };
@@ -1839,7 +1820,7 @@ class P2PServer {
             type: MessageType.NEW_NODE_LIST,
             data: {
                 nodes: connectedNodes || [],
-                validators: Chain.instance.eligibleValidators || [],
+                proposers: Chain.instance.eligibleProposers || [],
                 selectedProposer: Chain.instance.selectedProposer,
             },
         };
@@ -1853,17 +1834,19 @@ class P2PServer {
     }
 }
 function createWallet() {
+    console.log("creating wallet");
     const wallet = new Wallet();
     // Define the directory path in the user's Documents folder
-    const dirPath = path_1.default.join(os_1.default.homedir(), "Documents", "ProofOfCredit");
-    const filePath = path_1.default.join(dirPath, `privateKey-${Math.round(Math.random() * 10000)}.dat`);
+    const dirPath = path.join(os.homedir(), "Documents", "Credunity");
+    const filePath = path.join(dirPath, `privateKey-${Math.round(Math.random() * 10000)}.dat`);
     // Ensure the directory exists
-    fs_1.default.mkdirSync(dirPath, { recursive: true });
-    fs_1.default.writeFileSync(filePath, wallet.privateKey);
+    fs.mkdirSync(dirPath, { recursive: true });
+    fs.writeFileSync(filePath, wallet.privateKey);
     console.log(`New wallet created and saved to '${filePath}'`);
 }
 // --- Chain Initialization and P2P Server Setup ---
 const args = process.argv.slice(2);
+console.log(args);
 if (args.length === 0 || (args.includes("--createWallet") && args.length > 1)) {
     console.error("Usage: node index.js [--createWallet] | [--privateKey <private_key_file>] [--port <port>] [--peers <peer1,peer2>]");
     process.exit(1);
@@ -1893,6 +1876,7 @@ else {
 (async () => {
     try {
         const basePort = 3170;
+        console.log(basePort);
         const p2pServer = await P2PServer.create(basePort, peers);
         Chain.instance.setP2PServer(p2pServer);
         console.log(`P2P Server successfully started on port ${p2pServer.getPort()}`);
