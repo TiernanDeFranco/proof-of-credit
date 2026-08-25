@@ -1,0 +1,1 @@
+Basic prototype of my experiments making a new kind of crypto currency trying to decouple wealth and power, where time spent validating the network as an honest node would improve your credit score, which can be used to mint tokens, at the expense of lowering your credit score back to default, making you have less power
